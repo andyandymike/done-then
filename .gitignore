@@ -1,0 +1,42 @@
+# Local specifications (intentionally not published)
+/spec/
+/specs/
+
+# Build outputs
+/bin/
+/dist/
+/build/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+
+# DoneThen runtime state
+/.done-then/
+*.pid
+*.log
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*~
+
+# Editors and IDEs
+/.idea/
+/.vscode/
+*.user
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
