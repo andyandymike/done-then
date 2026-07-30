@@ -60,7 +60,7 @@ func TestRunnerTimeout(t *testing.T) {
 func TestResolveProgramUsesVerifierWorkingDirectoryForRelativePaths(t *testing.T) {
 	workingDir := t.TempDir()
 	want := filepath.Join(workingDir, "tools", "verify.exe")
-	if got := resolveProgram(`tools\verify.exe`, workingDir); got != want {
+	if got := resolveProgram(filepath.Join("tools", "verify.exe"), workingDir); got != want {
 		t.Fatalf("resolveProgram() = %q, want %q", got, want)
 	}
 	if got := resolveProgram("go", workingDir); got != "go" {
