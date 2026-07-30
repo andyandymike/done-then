@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows / Go
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Check formatting
+        shell: pwsh
+        run: |
+          $files = @(git ls-files '*.go')
+          $unformatted = @(gofmt -l $files)
+          if ($unformatted.Count -ne 0) {
+            Write-Error "The following files are not formatted:`n$($unformatted -join "`n")"
+            exit 1
+          }
+
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'donethen.exe'
+          go build -trimpath -o $output ./cmd/donethen
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $output --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $buildInfo = @(& go version -m $output)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $expectedRevision = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($buildInfo -cnotcontains "`tbuild`tvcs.revision=$expectedRevision") {
+            Write-Error "Built binary does not contain the checked-out revision $expectedRevision."
+            exit 1
+          }
+          if ($buildInfo -cnotcontains "`tbuild`tvcs.modified=false") {
+            Write-Error 'Built binary is missing clean VCS metadata.'
+            exit 1
+          }

@@ -6,6 +6,8 @@
 /bin/
 /dist/
 /build/
+/out/
+/artifacts/
 *.exe
 *.dll
 *.so
@@ -13,6 +15,16 @@
 *.test
 *.out
 coverage.*
+*.coverprofile
+
+# Local Go workspaces and diagnostics
+/go.work
+/go.work.sum
+*.prof
+*.pprof
+*.trace
+*.dmp
+*.sarif
 
 # DoneThen runtime state
 /.done-then/
@@ -23,10 +35,24 @@ coverage.*
 .env
 .env.*
 !.env.example
+/.secrets/
+*.pfx
+*.p12
+*.p8
+*.key
+
+# Local scan and investigation reports may contain usernames or paths
+/local-reports/
+/scan-reports/
 
 # Temporary files
+/.tmp/
+/tmp/
 *.tmp
 *.temp
+*.bak
+*.orig
+*.rej
 *.swp
 *~
 
@@ -39,4 +65,3 @@ coverage.*
 .DS_Store
 Thumbs.db
 Desktop.ini
-

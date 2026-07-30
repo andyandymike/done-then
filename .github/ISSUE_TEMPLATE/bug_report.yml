@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible DoneThen defect without sensitive data
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here. Follow [SECURITY.md](https://github.com/andyandymike/done-then/blob/main/SECURITY.md).
+        Redact prompts, tokens, usernames, private paths, and repository contents.
+  - type: input
+    id: version
+    attributes:
+      label: DoneThen version or commit
+      placeholder: v0.1.0-alpha or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and architecture
+      placeholder: Windows 11 24H2, amd64
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - Dry-run
+        - Execute with fake backend
+        - Execute with real Windows backend
+        - Status or cancel only
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Prefer dry-run or a fake backend. Do not include secrets or full prompts.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and redacted evidence
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I removed credentials, prompts, transcripts, private source, and identifying paths.
+          required: true
+        - label: I did not test against another person's machine, account, or active task.
+          required: true

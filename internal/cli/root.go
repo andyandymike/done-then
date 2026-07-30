@@ -1,0 +1,114 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"io"
+
+	"github.com/andyandymike/done-then/internal/actions"
+	"github.com/andyandymike/done-then/internal/codexexec"
+	"github.com/andyandymike/done-then/internal/platform"
+)
+
+var Version = "0.1.0-dev"
+
+type IO struct {
+	Stdin  io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
+}
+
+type dependencies struct {
+	dataRoot         func() (string, error)
+	resolveCodex     func(string) (codexexec.Executable, error)
+	acquirePowerLock func() (platform.PowerLock, error)
+	newActionBackend func() actions.Backend
+}
+
+func defaultDependencies() dependencies {
+	return dependencies{
+		dataRoot:         dataRoot,
+		resolveCodex:     codexexec.ResolveExecutable,
+		acquirePowerLock: platform.AcquirePowerLock,
+		newActionBackend: actions.NewPlatformBackend,
+	}
+}
+
+func Run(ctx context.Context, args []string, streams IO) int {
+	return runWithDependencies(ctx, args, streams, defaultDependencies())
+}
+
+func runWithDependencies(ctx context.Context, args []string, streams IO, deps dependencies) int {
+	if len(args) == 0 {
+		printUsage(streams.Stderr)
+		return 2
+	}
+	switch args[0] {
+	case "run":
+		return runCommand(ctx, args[1:], streams, deps)
+	case "cancel":
+		return cancelCommand(ctx, args[1:], streams, deps)
+	case "status":
+		return statusCommand(args[1:], streams, deps)
+	case "version", "--version", "-version":
+		fmt.Fprintf(streams.Stdout, "donethen %s\n", Version)
+		return 0
+	case "help", "--help", "-h":
+		if len(args) > 1 {
+			switch args[1] {
+			case "run":
+				printRunUsage(streams.Stdout)
+			case "cancel":
+				printCancelUsage(streams.Stdout)
+			case "status":
+				printStatusUsage(streams.Stdout)
+			default:
+				printUsage(streams.Stdout)
+			}
+		} else {
+			printUsage(streams.Stdout)
+		}
+		return 0
+	default:
+		fmt.Fprintf(streams.Stderr, "[DoneThen] Unknown command %q.\n", args[0])
+		printUsage(streams.Stderr)
+		return 2
+	}
+}
+
+func printRunUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "Usage: donethen run [options] -- codex exec [options] PROMPT")
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "Core options:")
+	fmt.Fprintln(writer, "  --action shutdown              Required action")
+	fmt.Fprintln(writer, "  --dry-run                      Run all gates without a power action (default)")
+	fmt.Fprintln(writer, "  --execute                      Allow the real Windows action backend")
+	fmt.Fprintln(writer, "  --delay 2m                     Cancellable shutdown delay (30s to 1h)")
+	fmt.Fprintln(writer, "  --verify-program PATH          Trusted verifier executable")
+	fmt.Fprintln(writer, "  --verify-arg VALUE             Verifier argument; repeat as needed")
+	fmt.Fprintln(writer, "  --allow-agent-only-success     Required for execute without a verifier")
+	fmt.Fprintln(writer, "  --task-timeout 24h             Codex timeout (1m to 168h)")
+	fmt.Fprintln(writer, "  --verify-timeout 10m           Verifier timeout (1s to 1h)")
+	fmt.Fprintln(writer, "  --codex-path PATH              Override the Codex executable")
+	fmt.Fprintln(writer, "  --keep-artifacts               Keep schema and final-response files")
+	fmt.Fprintln(writer, "  --allow-dangerous-codex-flags  Permit restricted Codex flags with a warning")
+}
+
+func printCancelUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "Usage: donethen cancel [job-id]")
+	fmt.Fprintln(writer, "Disarms future action without terminating a running Codex task.")
+}
+
+func printStatusUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "Usage: donethen status [job-id]")
+}
+
+func printUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "DoneThen - safe post-task actions for coding agents")
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "Usage:")
+	fmt.Fprintln(writer, "  donethen run [options] -- codex exec [options] PROMPT")
+	fmt.Fprintln(writer, "  donethen cancel [job-id]")
+	fmt.Fprintln(writer, "  donethen status [job-id]")
+	fmt.Fprintln(writer, "  donethen version")
+}

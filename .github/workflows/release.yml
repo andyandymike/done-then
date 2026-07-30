@@ -1,0 +1,206 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build_windows_amd64:
+    name: Build Windows amd64
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    outputs:
+      version: ${{ steps.release_metadata.outputs.version }}
+      prerelease: ${{ steps.release_metadata.outputs.prerelease }}
+      artifact_name: ${{ steps.release_metadata.outputs.artifact_name }}
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Validate release tag
+        id: release_metadata
+        shell: pwsh
+        run: |
+          $tag = $env:RELEASE_TAG
+          $identifier = '(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+          $pattern = "^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-$identifier(\.$identifier)*)?$"
+          if ($tag -notmatch $pattern) {
+            Write-Error "Release tag is not supported SemVer: $tag"
+            exit 1
+          }
+          $version = $tag.Substring(1)
+          $prerelease = $version.Contains('-').ToString().ToLowerInvariant()
+          $artifactName = "donethen-$version-windows-amd64"
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_PRERELEASE=$prerelease" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "prerelease=$prerelease" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "artifact_name=$artifactName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Check formatting
+        shell: pwsh
+        run: |
+          $files = @(git ls-files '*.go')
+          $unformatted = @(gofmt -l $files)
+          if ($unformatted.Count -ne 0) {
+            Write-Error "The following files are not formatted:`n$($unformatted -join "`n")"
+            exit 1
+          }
+
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build and package
+        shell: pwsh
+        run: |
+          $packageName = "donethen_$($env:RELEASE_VERSION)_windows_amd64"
+          $packageDir = Join-Path $env:RUNNER_TEMP $packageName
+          $distDir = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+
+          $env:CGO_ENABLED = '0'
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          $ldflags = "-X github.com/andyandymike/done-then/internal/cli.Version=$($env:RELEASE_VERSION)"
+          $binary = Join-Path $packageDir 'donethen.exe'
+          go build -trimpath -ldflags $ldflags -o $binary ./cmd/donethen
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $actualVersion = (& $binary --version | Out-String).Trim()
+          $expectedVersion = "donethen $($env:RELEASE_VERSION)"
+          if ($actualVersion -cne $expectedVersion) {
+            Write-Error "Version mismatch: expected '$expectedVersion', got '$actualVersion'"
+            exit 1
+          }
+
+          $buildInfo = @(& go version -m $binary)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $expectedRevision = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($buildInfo -cnotcontains "`tbuild`tvcs.revision=$expectedRevision") {
+            Write-Error "Release binary does not contain the tagged revision $expectedRevision."
+            exit 1
+          }
+          if ($buildInfo -cnotcontains "`tbuild`tvcs.modified=false") {
+            Write-Error 'Release binary is missing clean VCS metadata.'
+            exit 1
+          }
+
+          Copy-Item README.md, LICENSE, CHANGELOG.md -Destination $packageDir
+          $archive = Join-Path $distDir "$packageName.zip"
+          Compress-Archive -Path (Join-Path $packageDir '*') -DestinationPath $archive
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($archive)
+          try {
+            $entries = @($zip.Entries | ForEach-Object { $_.FullName } | Sort-Object)
+          } finally {
+            $zip.Dispose()
+          }
+          $expectedEntries = @('CHANGELOG.md', 'LICENSE', 'README.md', 'donethen.exe')
+          if (Compare-Object $expectedEntries $entries) {
+            Write-Error "Unexpected archive entries: $($entries -join ', ')"
+            exit 1
+          }
+
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  $([System.IO.Path]::GetFileName($archive))" |
+            Out-File -FilePath (Join-Path $distDir 'SHA256SUMS.txt') -Encoding ascii
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.release_metadata.outputs.artifact_name }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish GitHub release
+    needs: build_windows_amd64
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_VERSION: ${{ needs.build_windows_amd64.outputs.version }}
+      RELEASE_PRERELEASE: ${{ needs.build_windows_amd64.outputs.prerelease }}
+
+    steps:
+      - name: Download verified workflow artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.build_windows_amd64.outputs.artifact_name }}
+          path: dist
+
+      - name: Verify downloaded release assets
+        shell: pwsh
+        run: |
+          $archiveName = "donethen_$($env:RELEASE_VERSION)_windows_amd64.zip"
+          $archive = Join-Path 'dist' $archiveName
+          $sums = Join-Path 'dist' 'SHA256SUMS.txt'
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            Write-Error "Release archive is missing: $archive"
+            exit 1
+          }
+          if (-not (Test-Path -LiteralPath $sums -PathType Leaf)) {
+            Write-Error "Checksum file is missing: $sums"
+            exit 1
+          }
+          $line = (Get-Content -LiteralPath $sums -Raw).Trim()
+          $pattern = "^([0-9a-f]{64})  $([regex]::Escape($archiveName))$"
+          if ($line -cnotmatch $pattern) {
+            Write-Error 'SHA256SUMS.txt has an unexpected format or filename.'
+            exit 1
+          }
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actual -cne $Matches[1]) {
+            Write-Error "Release archive checksum mismatch: expected $($Matches[1]), got $actual"
+            exit 1
+          }
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $archive = "dist/donethen_$($env:RELEASE_VERSION)_windows_amd64.zip"
+          $arguments = @(
+            'release', 'create', $env:RELEASE_TAG,
+            $archive, 'dist/SHA256SUMS.txt',
+            '--verify-tag', '--generate-notes',
+            '--title', "DoneThen $($env:RELEASE_VERSION)"
+          )
+          if ($env:RELEASE_PRERELEASE -eq 'true') {
+            $arguments += '--prerelease'
+            $arguments += '--latest=false'
+          }
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

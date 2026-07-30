@@ -2,15 +2,34 @@
 
 **Safe post-task actions for coding agents.**
 
-DoneThen is an open-source task supervisor that performs an explicitly armed
-action only after a coding-agent task has been verified as complete.
+[![CI](https://github.com/andyandymike/done-then/actions/workflows/ci.yml/badge.svg)](https://github.com/andyandymike/done-then/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+DoneThen is an open-source, Windows-first task supervisor. It performs an
+explicitly armed action only after a coding-agent task has been verified as
+complete.
 
 The first integration target is OpenAI Codex, while the core completion and
 action model is intended to remain agent-agnostic.
 
 > [!IMPORTANT]
-> DoneThen is currently in the design phase. There is no working release yet,
-> and none of the commands shown below are available today.
+> DoneThen now has a source-level Windows pre-alpha implementation, but there is
+> no published or signed release yet. The repository contains a tag-driven
+> packaging workflow, but a public tag must not be created until the manual
+> countdown-and-cancel acceptance is complete. Automated tests never invoke a
+> real power action. Use dry-run first, and treat `--execute` as an explicit
+> request to use the native Windows shutdown backend.
+
+## Current status
+
+The current source implements the complete pre-alpha `codex exec` supervision
+path: structured completion validation, an optional external verifier,
+one-shot state, dry-run, cancellation, and the Windows shutdown backend.
+
+There is no supported binary download yet. The first public alpha remains
+blocked on the documented manual countdown-and-cancel acceptance. Existing
+Codex Desktop tasks cannot currently be attached; DoneThen starts and
+supervises a new non-interactive Codex run.
 
 ## Why DoneThen?
 
@@ -37,7 +56,7 @@ User arm
 
 ## Safety model
 
-DoneThen is being designed around these rules:
+DoneThen uses these rules:
 
 - Actions must be armed by the user outside the model.
 - Unknown, malformed, interrupted, partial, blocked, or failed results keep the
@@ -45,17 +64,33 @@ DoneThen is being designed around these rules:
 - Every armed job is one-shot, time-limited, and bound to a unique nonce.
 - Destructive actions use a visible countdown and remain cancellable.
 - Dry-run is the default during setup and testing.
-- Arbitrary model-provided shell commands are never executed.
+- DoneThen never executes model-provided post-task command strings.
 - Adapters report lifecycle events; they do not own shutdown authority.
+- Real power jobs are serialized across Windows sessions and unresolved action
+  records block later jobs until explicitly cancelled.
 - Duplicate events and process restarts must not execute an action twice.
 
-## Planned Codex integrations
+### Trust boundaries
+
+- DoneThen supervises Codex; it is not a general operating-system sandbox for
+  the coding task itself.
+- Dangerous Codex flags are rejected by default. Explicitly allowing them can
+  let Codex invoke host commands outside DoneThen's safety boundary.
+- An external verifier is a user-selected trusted executable. It is run with
+  argv, without a shell, but is not sandboxed by DoneThen.
+- Windows `shutdown.exe /a` is system-global. Cancelling a DoneThen countdown
+  can also abort another shutdown that was scheduled concurrently.
+
+## Codex integrations
 
 ### `codex exec`
 
-The initial and most reliable mode will wrap non-interactive `codex exec` runs.
-DoneThen will combine the process exit status with a validated final response
-produced through Codex's `--output-schema` support.
+The implemented MVP wraps a new non-interactive `codex exec` run. DoneThen
+combines the process exit status with a final response constrained by
+`--output-schema`, then validates that response again outside Codex.
+
+The MVP does not attach to an already running Codex Desktop task. App Server
+and Hook support remain separate future adapters.
 
 ### Codex App Server
 
@@ -76,65 +111,158 @@ Relevant upstream documentation:
 - [Codex Stop hooks](https://learn.chatgpt.com/docs/hooks#stop)
 - [Codex plugin packaging](https://developers.openai.com/plugins/build/plugins)
 
-## Planned actions
+## Actions
+
+The implemented MVP supports:
+
+- Windows shutdown
+
+Possible later actions include:
 
 - Desktop notification
 - Sound notification
 - Lock screen
 - Sleep
 - Hibernate
-- Shutdown
+- Cross-platform shutdown
 
-Actions will be implemented through narrow, platform-specific backends rather
+Actions use narrow, platform-specific backends rather
 than model-generated command strings.
 
-## Proposed CLI
+## Requirements
 
-The exact interface may change before the first release.
+- Windows 10 or 11 on `amd64` for the implemented action backend.
+- Go 1.26 or newer to build the pre-alpha source.
+- An installed and authenticated Codex CLI available as `codex`, or an
+  explicit path supplied with `--codex-path`.
+
+## Build from source
+
+Clone a checkout you can review, then run:
 
 ```powershell
-donethen run `
+git clone https://github.com/andyandymike/done-then.git
+Set-Location done-then
+go test -count=1 ./...
+go vet ./...
+New-Item -ItemType Directory -Force bin | Out-Null
+go build -trimpath -o bin\donethen.exe ./cmd/donethen
+go version -m bin\donethen.exe
+.\bin\donethen.exe --version
+```
+
+The CLI remains pre-alpha and may change before the first release.
+
+Tagged releases are designed to contain an unsigned Windows `amd64` zip and a
+`SHA256SUMS.txt` file. A checksum detects accidental or malicious file changes;
+it is not a substitute for code signing or independent provenance. Release
+binaries retain Go symbols and embedded Git revision metadata instead of being
+stripped into a smaller, less inspectable executable.
+
+## Usage
+
+### Start with dry-run
+
+Run the complete supervision path without allowing a power action:
+
+```powershell
+.\bin\donethen.exe run `
   --action shutdown `
+  --dry-run `
   --delay 120s `
-  --verify "go test ./..." `
-  -- codex exec -C D:\project "Implement the requested change and verify it"
+  --verify-program go `
+  --verify-arg test `
+  --verify-arg ./... `
+  -- codex exec -C C:\path\to\your-project "Implement the requested change and verify it"
 ```
 
-Cancel an armed job or active countdown:
+Dry-run still starts Codex and the configured verifier, but it does not call
+the operating-system action backend.
+
+### Explicitly allow the Windows action
+
+Allow a real shutdown only after Codex and the external verifier both succeed:
 
 ```powershell
-donethen cancel
+.\bin\donethen.exe run `
+  --action shutdown `
+  --execute `
+  --delay 120s `
+  --verify-program go `
+  --verify-arg test `
+  --verify-arg ./... `
+  -- codex exec -C C:\path\to\your-project "Implement the requested change and verify it"
 ```
 
-Inspect a job without allowing side effects:
+Without an external verifier, execute mode additionally requires
+`--allow-agent-only-success`. This explicitly accepts that completion is based
+only on Codex's structured self-report.
+
+Cancel an armed job or an active Windows countdown:
 
 ```powershell
-donethen run --dry-run --action shutdown -- codex exec "Run the task"
+.\bin\donethen.exe cancel [job-id]
 ```
 
-## Planned repository layout
+Inspect local jobs:
+
+```powershell
+.\bin\donethen.exe status
+.\bin\donethen.exe status [job-id]
+```
+
+Job records and redacted JSONL lifecycle logs live under
+`%LOCALAPPDATA%\DoneThen`. Prompts, transcripts, environment variables, and
+model response bodies are not stored there.
+
+## Antivirus and unsigned binaries
+
+Pre-alpha binaries are not code-signed. A newly built Windows executable can
+occasionally receive a heuristic antivirus detection even when built from the
+reviewed source. DoneThen release builds deliberately avoid packers,
+obfuscation, and stripped Go symbols; they retain Git build metadata and are
+published with a SHA-256 checksum. These measures improve inspectability but
+do not guarantee that every antivirus product will agree on every build.
+
+Do not disable antivirus protection or add a broad folder exclusion to run
+DoneThen. If a build is detected, keep it quarantined and record the DoneThen
+commit, exact file hash, antivirus product and database version, and detection
+name. Reproduce from a clean checkout, then open a
+[bug report](https://github.com/andyandymike/done-then/issues/new?template=bug_report.yml)
+with identifying paths and task data redacted. Use the private process in
+[SECURITY.md](SECURITY.md) instead if the binary behaves differently from the
+reviewed source or the report may expose sensitive information.
+
+## Repository layout
 
 ```text
 cmd/donethen/             CLI entry point
+internal/cli/             run, cancel, and status commands
+internal/codexexec/       validated Codex exec adapter
+internal/completion/      completion envelope and policy
 internal/supervisor/      one-shot job state machine
-internal/policy/          completion and safety evaluation
-internal/adapters/        Codex exec, App Server, and Hook adapters
-internal/actions/         Windows, Linux, and macOS backends
-schemas/                  completion-envelope JSON Schemas
-plugin/                   optional Codex plugin package
-tests/                    unit, integration, and failure-path tests
+internal/store/           atomic records and redacted logs
+internal/verifier/        argv-only external verification
+internal/actions/         fake and Windows shutdown backends
+internal/platform/        Windows power-job lock
+internal/processgroup/    child-process tree cleanup
+tests/                    contract tests and fake Codex fixture
+docs/                     public release and operational guidance
 ```
 
-Local implementation specifications will live under `spec/` or `specs/` and
-are intentionally excluded from version control. Stable public decisions
-should eventually be promoted into this README or the public documentation.
+Maintainer working notes under `spec/` or `specs/` are intentionally excluded
+from version control and are not part of the public contract.
+Contributor-facing requirements and stable decisions must be documented in
+tracked files such as this README, `CONTRIBUTING.md`, or `docs/`.
 
 ## Roadmap
 
-- [ ] Define the completion-envelope schema and one-shot job state machine.
-- [ ] Build a Windows-first `codex exec` wrapper with dry-run support.
-- [ ] Add countdown, cancellation, expiration, and restart recovery.
-- [ ] Test every power action through a fake backend in CI.
+- [x] Define the completion-envelope schema and one-shot job state machine.
+- [x] Build a Windows-first `codex exec` wrapper with dry-run support.
+- [x] Add countdown, cancellation, and fail-closed restart recovery.
+- [x] Test the shutdown action boundary through a fake backend in CI.
+- [x] Add license, community health files, and checksum-producing release CI.
+- [ ] Complete the real Windows countdown-and-cancel release acceptance.
 - [ ] Add the Codex App Server adapter.
 - [ ] Package the optional Codex Hook/plugin adapter.
 - [ ] Add Linux and macOS action backends.
@@ -142,7 +270,13 @@ should eventually be promoted into this README or the public documentation.
 
 ## Contributing
 
-DoneThen is not ready for external contributions yet. The contribution guide,
-code of conduct, security policy, and license will be added before the first
-public development release.
+DoneThen is still pre-alpha. Read [CONTRIBUTING.md](CONTRIBUTING.md) before
+submitting a change, report vulnerabilities through [SECURITY.md](SECURITY.md),
+and follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Release maintainers must
+complete the [release checklist](docs/release-checklist.md). Use the public
+[issue tracker](https://github.com/andyandymike/done-then/issues) for ordinary
+bugs and feature requests that contain no sensitive data.
 
+## License
+
+DoneThen is licensed under the [Apache License 2.0](LICENSE).
