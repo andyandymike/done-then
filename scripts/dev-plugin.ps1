@@ -372,9 +372,8 @@ if ($Action -eq 'Plan') {
     return
 }
 
-$codexPath = Resolve-CommandPath -Name $CodexCommand -Repository $repositoryRootPath -Required
-
 if ($Action -eq 'Status') {
+    $codexPath = Resolve-CommandPath -Name $CodexCommand -Repository $repositoryRootPath -Required
     $inventory = Get-CodexInventory -Executable $codexPath
     $marketplaceRoot = if ($null -ne $inventory.Marketplace) { [string]$inventory.Marketplace.root } else { $null }
     $status = [ordered]@{
@@ -400,6 +399,8 @@ if (-not $PSCmdlet.ShouldProcess($pluginID, "$Action local development plugin"))
     ConvertTo-StableJson -Value $plan
     return
 }
+
+$codexPath = Resolve-CommandPath -Name $CodexCommand -Repository $repositoryRootPath -Required
 
 if ($Action -in @('Install', 'Reinstall')) {
     $runtimePath = Resolve-CommandPath -Name $DoneThenPath -Repository $repositoryRootPath -Required
