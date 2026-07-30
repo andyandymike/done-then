@@ -1,6 +1,10 @@
 title: DoneThen
-description: Safe post-task actions for coding agents
-theme: jekyll-theme-minimal
-show_downloads: true
+description: A fail-closed safety layer for post-task actions in coding-agent workflows.
 url: https://andyandymike.github.io
 baseurl: /done-then
+lang: en
+markdown: kramdown
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+repository: andyandymike/done-then

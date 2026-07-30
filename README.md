@@ -208,7 +208,8 @@ integrity and traceability, but they are not substitutes for Authenticode code
 signing. Release binaries retain Go symbols and embedded Git revision metadata
 instead of being stripped into a smaller, less inspectable executable.
 
-The public documentation site is published from [`docs/`](docs/index.md).
+The public documentation site is published from [`docs/`](docs/index.html) and
+uses the project-owned visual contract in [`DESIGN.md`](DESIGN.md).
 
 ## Plugin development preview
 
@@ -342,6 +343,7 @@ internal/processgroup/    child-process tree cleanup
 tests/                    contract tests and fake Codex fixture
 scripts/                  reversible plugin development and smoke-test tools
 docs/                     public release and operational guidance
+DESIGN.md                 public visual identity and UI token contract
 ```
 
 Maintainer working notes under `spec/` or `specs/` are intentionally excluded

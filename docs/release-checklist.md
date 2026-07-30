@@ -1,3 +1,9 @@
+---
+layout: default
+title: Release checklist
+description: Source, CI, cancellation, artifact, and post-release gates for DoneThen releases.
+---
+
 # Release checklist
 
 This checklist applies to the first DoneThen Windows alpha and later releases.

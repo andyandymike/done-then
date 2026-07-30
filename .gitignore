@@ -8,6 +8,9 @@
 /build/
 /out/
 /artifacts/
+/output/
+/.playwright-cli/
+/.reviews/
 *.exe
 *.dll
 *.so

@@ -1,3 +1,9 @@
+---
+layout: default
+title: Local plugin development
+description: Install and verify the observe-only DoneThen Codex plugin without overwriting existing Hooks.
+---
+
 # Local plugin development
 
 This guide installs the DoneThen plugin through a disposable local Codex
