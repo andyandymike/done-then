@@ -202,10 +202,13 @@ the baseline, manual Hook trust, live dry-run, verification, and uninstall
 workflow.
 
 Tagged releases are designed to contain an unsigned Windows `amd64` zip and a
-`SHA256SUMS.txt` file. A checksum detects accidental or malicious file changes;
-it is not a substitute for code signing or independent provenance. Release
-binaries retain Go symbols and embedded Git revision metadata instead of being
-stripped into a smaller, less inspectable executable.
+`SHA256SUMS.txt` file. GitHub Actions also creates a Sigstore-backed build
+provenance attestation for both assets. A checksum and attestation improve
+integrity and traceability, but they are not substitutes for Authenticode code
+signing. Release binaries retain Go symbols and embedded Git revision metadata
+instead of being stripped into a smaller, less inspectable executable.
+
+The public documentation site is published from [`docs/`](docs/index.md).
 
 ## Plugin development preview
 

@@ -17,6 +17,11 @@ jobs:
     name: Build Windows amd64
     runs-on: windows-latest
     timeout-minutes: 25
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
     env:
       RELEASE_TAG: ${{ github.ref_name }}
     outputs:
@@ -129,6 +134,13 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
           "$hash  $([System.IO.Path]::GetFileName($archive))" |
             Out-File -FilePath (Join-Path $distDir 'SHA256SUMS.txt') -Encoding ascii
+
+      - name: Attest release assets
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

@@ -93,6 +93,7 @@ do not publish the release:
 - [ ] `go version -m donethen.exe` reports the tagged `vcs.revision`,
       `vcs.modified=false`, and retained build metadata.
 - [ ] The published zip hash matches `SHA256SUMS.txt`.
+- [ ] `gh attestation verify <zip> --repo andyandymike/done-then` succeeds.
 - [ ] A prerelease tag is marked as a GitHub prerelease and not Latest.
 - [ ] Release notes say that the Windows binary is unsigned.
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -103,6 +104,46 @@ func TestPluginRuntimeCannotReachPowerBackend(t *testing.T) {
 			text := string(data)
 			if strings.Contains(text, "/internal/actions") || strings.Contains(strings.ToLower(text), "shutdown.exe") {
 				t.Fatalf("plugin runtime crossed the power-backend boundary in %s", path)
+			}
+		}
+	}
+}
+
+func TestGitHubWorkflowsUsePinnedActionsAndNoPowerCommands(t *testing.T) {
+	workflowRoot := filepath.Join(repositoryRoot(t), ".github", "workflows")
+	entries, err := os.ReadDir(workflowRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actionReference := regexp.MustCompile(`(?m)^\s*uses:\s*([^#\s]+)`)
+	commitSHA := regexp.MustCompile(`^[0-9a-f]{40}$`)
+	for _, entry := range entries {
+		if entry.IsDir() || (filepath.Ext(entry.Name()) != ".yml" && filepath.Ext(entry.Name()) != ".yaml") {
+			continue
+		}
+		path := filepath.Join(workflowRoot, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		lower := strings.ToLower(text)
+		for _, forbidden := range []string{"pull_request_target", "shutdown.exe", "stop-computer", "rundll32.exe"} {
+			if strings.Contains(lower, forbidden) {
+				t.Fatalf("workflow %s contains forbidden content %q", path, forbidden)
+			}
+		}
+		if !strings.Contains(text, "permissions:") {
+			t.Fatalf("workflow %s has no explicit permissions block", path)
+		}
+		for _, match := range actionReference.FindAllStringSubmatch(text, -1) {
+			reference := match[1]
+			if strings.HasPrefix(reference, "./") || strings.HasPrefix(reference, "docker://") {
+				continue
+			}
+			separator := strings.LastIndex(reference, "@")
+			if separator < 0 || !commitSHA.MatchString(reference[separator+1:]) {
+				t.Fatalf("workflow %s uses an unpinned action %q", path, reference)
 			}
 		}
 	}

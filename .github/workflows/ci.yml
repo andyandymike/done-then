@@ -2,10 +2,17 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   windows:
@@ -62,3 +69,38 @@ jobs:
             Write-Error 'Built binary is missing clean VCS metadata.'
             exit 1
           }
+
+  linux:
+    name: Linux / Go
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then
+            printf 'The following files are not formatted:\n%s\n' "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: Test portable behavior
+        run: go test -count=1 ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build portable fallback
+        run: go build ./cmd/donethen
