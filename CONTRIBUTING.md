@@ -24,6 +24,19 @@ Format Go changes before submitting them:
 go fmt ./...
 ```
 
+Plugin packaging changes must also keep the development scripts fail-closed:
+
+```powershell
+pwsh -NoProfile -File .\scripts\dev-plugin.ps1 -Action Plan
+pwsh -NoProfile -File .\scripts\dev-plugin.ps1 -Action Install -Apply -WhatIf
+pwsh -NoProfile -File .\scripts\live-smoke.ps1 -Action Plan
+pwsh -NoProfile -File .\scripts\live-smoke.ps1 -Action Snapshot -Apply -WhatIf
+```
+
+These checks must not install a plugin, build an executable, or write a live
+Codex configuration. The separately authorized manual workflow is documented
+in [`docs/plugin-development.md`](docs/plugin-development.md).
+
 ## Safety requirements
 
 - Never invoke `shutdown.exe /s` from an automated test, CI workflow, or
@@ -39,6 +52,17 @@ go fmt ./...
 - Keep cancellation available and do not add forced shutdown.
 - Do not log prompts, transcripts, environment variables, model response
   bodies, tokens, or file contents.
+- Do not edit, merge, disable, reorder, or bypass trust for user, project,
+  managed, or other-plugin Hooks.
+- Development install tooling must use the Codex plugin CLI, require explicit
+  apply intent, and confine disposable marketplace files to the verified
+  ignored staging root.
+- DoneThen observer Hooks must exit successfully without model-facing output,
+  continuation, input rewriting, approval decisions, verifier execution, or
+  action-backend access.
+- Keep plugin execute mode unavailable until authoritative effective-Hook and
+  active-task inventory checks are implemented and tested at every action
+  gate.
 - A new action or platform backend requires a separate design, tests, and an
   explicit trust-boundary review.
 

@@ -1,0 +1,37 @@
+{
+  "name": "done-then",
+  "version": "0.1.0",
+  "description": "Safely observe Codex task completion before a post-task action.",
+  "author": {
+    "name": "andyandymike",
+    "url": "https://github.com/andyandymike"
+  },
+  "homepage": "https://github.com/andyandymike/done-then",
+  "repository": "https://github.com/andyandymike/done-then",
+  "license": "Apache-2.0",
+  "keywords": [
+    "codex",
+    "automation",
+    "shutdown",
+    "safety"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Done Then",
+    "shortDescription": "Safe post-task action intent for Codex",
+    "longDescription": "Arm a time-limited action intent, report structured completion, and observe Codex lifecycle events without replacing existing hooks.",
+    "developerName": "andyandymike",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/andyandymike/done-then",
+    "defaultPrompt": [
+      "Use Done Then in dry-run mode for this task and report whether every safety gate is observed.",
+      "Show the current Done Then job status without taking a power action."
+    ],
+    "brandColor": "#2563EB"
+  }
+}

@@ -3,8 +3,11 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"os"
 	"text/tabwriter"
+	"time"
 
+	"github.com/andyandymike/done-then/internal/pluginstate"
 	"github.com/andyandymike/done-then/internal/store"
 	"github.com/andyandymike/done-then/internal/supervisor"
 )
@@ -25,54 +28,106 @@ func statusCommand(args []string, streams IO, deps dependencies) int {
 	if err != nil {
 		return runtimeError(streams.Stderr, supervisor.ExitStateError, "initialize DoneThen state", err)
 	}
+	pluginStore, err := pluginstate.New(root)
+	if err != nil {
+		return runtimeError(streams.Stderr, supervisor.ExitStateError, "initialize DoneThen plugin state", err)
+	}
 	var jobs []supervisor.Job
+	var pluginJobs []pluginstate.Job
 	if len(args) == 1 {
 		job, err := jobStore.Load(args[0])
-		if err != nil {
+		if err == nil {
+			jobs = []supervisor.Job{job}
+		} else if errors.Is(err, os.ErrNotExist) {
+			pluginJob, pluginErr := pluginStore.Load(args[0])
+			if pluginErr != nil {
+				return runtimeError(streams.Stderr, supervisor.ExitStateError, "load job", pluginErr)
+			}
+			if pluginJob.State.IsActive() && pluginJob.Expired(timeNowUTC()) {
+				pluginJob, pluginErr = pluginStore.RefreshExpiry(pluginJob.JobID)
+				if pluginErr != nil {
+					return runtimeError(streams.Stderr, supervisor.ExitStateError, "refresh plugin job", pluginErr)
+				}
+			}
+			pluginJobs = []pluginstate.Job{pluginJob}
+		} else {
 			return runtimeError(streams.Stderr, supervisor.ExitStateError, "load job", err)
 		}
-		jobs = []supervisor.Job{job}
 	} else {
 		jobs, err = jobStore.List()
 		if err != nil {
 			return runtimeError(streams.Stderr, supervisor.ExitStateError, "list jobs", err)
 		}
+		pluginJobs, err = pluginStore.List()
+		if err != nil {
+			return runtimeError(streams.Stderr, supervisor.ExitStateError, "list plugin jobs", err)
+		}
 	}
-	if len(jobs) == 0 {
+	if len(jobs) == 0 && len(pluginJobs) == 0 {
 		fmt.Fprintln(streams.Stdout, "[DoneThen] No jobs found.")
 		return 0
 	}
-	writer := tabwriter.NewWriter(streams.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(writer, "JOB ID\tSTATE\tMODE\tCANCEL\tACTION\tUPDATED\tSCHEDULED FOR")
-	for _, job := range jobs {
-		mode := "execute"
-		if job.DryRun {
-			mode = "dry-run"
+	if len(jobs) != 0 {
+		writer := tabwriter.NewWriter(streams.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(writer, "JOB ID\tSTATE\tMODE\tCANCEL\tACTION\tUPDATED\tSCHEDULED FOR")
+		for _, job := range jobs {
+			mode := "execute"
+			if job.DryRun {
+				mode = "dry-run"
+			}
+			scheduled := "-"
+			if job.ScheduledFor != nil {
+				scheduled = job.ScheduledFor.Local().Format("2006-01-02 15:04:05")
+			}
+			cancelled, err := jobStore.Cancelled(job.JobID)
+			if err != nil {
+				return runtimeError(streams.Stderr, supervisor.ExitStateError, "read cancellation state", err)
+			}
+			cancelState := "-"
+			if cancelled {
+				cancelState = "requested"
+			}
+			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				job.JobID,
+				job.State,
+				mode,
+				cancelState,
+				job.Action,
+				job.UpdatedAt.Local().Format("2006-01-02 15:04:05"),
+				scheduled,
+			)
 		}
-		scheduled := "-"
-		if job.ScheduledFor != nil {
-			scheduled = job.ScheduledFor.Local().Format("2006-01-02 15:04:05")
+		if err := writer.Flush(); err != nil {
+			return runtimeError(streams.Stderr, supervisor.ExitStateError, "write status", err)
 		}
-		cancelled, err := jobStore.Cancelled(job.JobID)
-		if err != nil {
-			return runtimeError(streams.Stderr, supervisor.ExitStateError, "read cancellation state", err)
-		}
-		cancelState := "-"
-		if cancelled {
-			cancelState = "requested"
-		}
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			job.JobID,
-			job.State,
-			mode,
-			cancelState,
-			job.Action,
-			job.UpdatedAt.Local().Format("2006-01-02 15:04:05"),
-			scheduled,
-		)
 	}
-	if err := writer.Flush(); err != nil {
-		return runtimeError(streams.Stderr, supervisor.ExitStateError, "write status", err)
+	if len(pluginJobs) != 0 {
+		writer := tabwriter.NewWriter(streams.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(writer, "PLUGIN JOB ID\tSTATE\tMODE\tHOOKS\tACTION\tEXPIRES\tEXECUTE")
+		for _, job := range pluginJobs {
+			if job.State.IsActive() && job.Expired(timeNowUTC()) {
+				refreshed, refreshErr := pluginStore.RefreshExpiry(job.JobID)
+				if refreshErr != nil {
+					return runtimeError(streams.Stderr, supervisor.ExitStateError, "refresh plugin job", refreshErr)
+				}
+				job = refreshed
+			}
+			status := pluginStore.Status(job)
+			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				status.JobID,
+				status.State,
+				status.Mode,
+				status.HookCompatibility,
+				status.Action,
+				job.ExpiresAt.Local().Format("2006-01-02 15:04:05"),
+				"unavailable",
+			)
+		}
+		if err := writer.Flush(); err != nil {
+			return runtimeError(streams.Stderr, supervisor.ExitStateError, "write plugin status", err)
+		}
 	}
 	return 0
 }
+
+var timeNowUTC = func() time.Time { return time.Now().UTC() }

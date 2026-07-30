@@ -1,0 +1,54 @@
+{
+  "description": "Observe only DoneThen lifecycle boundaries without modifying or steering Codex.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "^mcp__done_then__(arm|finish|pause|cancel)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "donethen hook",
+            "commandWindows": "donethen.exe hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "donethen hook",
+            "commandWindows": "donethen.exe hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "donethen hook",
+            "commandWindows": "donethen.exe hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "donethen hook",
+            "commandWindows": "donethen.exe hook",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

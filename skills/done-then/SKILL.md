@@ -1,0 +1,35 @@
+---
+name: done-then
+description: Safely arm, pause, finish, cancel, and inspect a time-limited DoneThen post-task action intention for the current Codex task. Use when the user asks for shutdown or another follow-up action after the task completes, or asks about an existing DoneThen plugin job.
+---
+
+# Done Then
+
+Use the typed `done_then` MCP tools. Never invoke an operating-system power
+command directly and never treat a stopped turn as proof that the task is done.
+
+## Workflow
+
+1. Explain that this plugin build is observe-only and cannot actually shut down
+   the machine yet.
+2. Call `done_then.arm` once with `mode: dry_run`, a bounded expiry, and the
+   user-requested delay. Preserve the returned `job_id`. Set
+   `allow_agent_only_success` only when the user explicitly accepts structured
+   agent self-report without an independent verifier.
+3. Continue the user's task in the same Codex task.
+4. Call `done_then.pause` before yielding for user input, approval, or external
+   state. Choose only one of the documented reason codes.
+5. Call `done_then.finish` only after the work is genuinely complete. Supply a
+   completion object with `status: done`, no remaining work, no pending
+   approval, and only checks that actually passed.
+6. Call `done_then.cancel` when the user retracts the request or the job should
+   not continue.
+7. Use `done_then.status` to report the persisted state. Do not expose or infer
+   nonces, transcripts, prompts, hook commands, or environment variables.
+
+If completion is partial, blocked, failed, unverified, expired, or ambiguous,
+keep the machine on. Do not call `finish` with invented evidence.
+
+In the final response, report the actual DoneThen state and remind the user
+that `execute` remains unavailable until authoritative hook-inventory checks
+are implemented.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Done Then"
+  short_description: "Observe safe post-task action gates"
+  default_prompt: "Use $done-then to arm an observe-only dry-run for this task, then report the final DoneThen state without invoking a power action."

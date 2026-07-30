@@ -42,3 +42,10 @@ func atomicWriteJSON(path string, value any) (returnedErr error) {
 	}
 	return nil
 }
+
+// AtomicWriteJSON writes a JSON record by flushing a temporary file and then
+// replacing the destination. It is exported for other DoneThen state stores
+// that need the same crash-safe replacement semantics.
+func AtomicWriteJSON(path string, value any) error {
+	return atomicWriteJSON(path, value)
+}

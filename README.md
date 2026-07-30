@@ -5,31 +5,42 @@
 [![CI](https://github.com/andyandymike/done-then/actions/workflows/ci.yml/badge.svg)](https://github.com/andyandymike/done-then/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-DoneThen is an open-source, Windows-first task supervisor. It performs an
-explicitly armed action only after a coding-agent task has been verified as
-complete.
+DoneThen is an open-source, Windows-first safety layer for post-task actions.
+Its primary design is a Codex plugin: the user asks once inside the original
+task, Codex calls typed DoneThen tools, and lifecycle hooks bind the result to
+that same task. There is no second Codex run and the user does not manually
+launch a watcher window.
 
 The first integration target is OpenAI Codex, while the core completion and
 action model is intended to remain agent-agnostic.
 
 > [!IMPORTANT]
-> DoneThen now has a source-level Windows pre-alpha implementation, but there is
-> no published or signed release yet. The repository contains a tag-driven
-> packaging workflow, but a public tag must not be created until the manual
-> countdown-and-cancel acceptance is complete. Automated tests never invoke a
-> real power action. Use dry-run first, and treat `--execute` as an explicit
-> request to use the native Windows shutdown backend.
+> The plugin is currently **observe-only**. Its `execute` arm mode is hard
+> disabled until Codex can provide an authoritative effective-Hook inventory
+> and the remaining coexistence gates are implemented. Neither an MCP call nor
+> a Hook can invoke the power backend in this build. The older `codex exec`
+> supervisor still contains an experimental `--execute` path, but it is not the
+> plugin workflow and there is no published or signed release yet.
 
 ## Current status
 
-The current source implements the complete pre-alpha `codex exec` supervision
-path: structured completion validation, an optional external verifier,
-one-shot state, dry-run, cancellation, and the Windows shutdown backend.
+The repository now contains the first plugin implementation slice:
 
-There is no supported binary download yet. The first public alpha remains
-blocked on the documented manual countdown-and-cancel acceptance. Existing
-Codex Desktop tasks cannot currently be attached; DoneThen starts and
-supervises a new non-interactive Codex run.
+- a Codex plugin manifest and `$done-then` Skill;
+- a stdio MCP server with `arm`, `finish`, `pause`, `cancel`, and `status`;
+- plugin-owned `PostToolUse`, `UserPromptSubmit`, `Stop`, and `SessionEnd`
+  observers;
+- atomic, process-serialized plugin job state and redacted event logs;
+- structured task/turn binding, strict completion validation, generation-based
+  stale-evidence invalidation, and CLI recovery through `status` and `cancel`.
+
+The plugin never edits user, project, managed, or other-plugin Hook files. Its
+own Hooks are loaded as another source and remain subject to Codex's normal
+review and trust flow.
+
+There is no supported binary download or one-command plugin installation yet.
+Verifier profiles, authoritative Hook inventory, task inventory, and the final
+power-action gate remain to be implemented before a power-enabled alpha.
 
 ## Why DoneThen?
 
@@ -40,25 +51,28 @@ directly from the agent is therefore both fragile and unsafe.
 
 DoneThen separates four responsibilities:
 
-1. The user explicitly arms an action.
-2. A Codex adapter observes the original task lifecycle.
-3. The supervisor validates structured completion evidence.
-4. A narrow operating-system backend performs the approved action after a
-   cancellable countdown.
+1. The user explicitly requests and approves a time-limited action intention.
+2. The Skill reports lifecycle state through typed MCP tools.
+3. Non-interfering Hooks bind those reports to the original task and turn.
+4. A supervisor outside the Hook evaluates every safety gate before a narrow
+   operating-system backend can act.
 
 ```text
-User arm
-   -> Codex completion adapter
-   -> fail-closed policy evaluation
-   -> cancellable countdown
-   -> native post-task action
+User request in the original Codex task
+   -> Skill calls done_then.arm
+   -> PostToolUse binds session and turn
+   -> work / pause / resume
+   -> done_then.finish validates structured evidence
+   -> Stop observer records a candidate boundary only
+   -> external final gate (not implemented; machine stays on)
 ```
 
 ## Safety model
 
 DoneThen uses these rules:
 
-- Actions must be armed by the user outside the model.
+- A user request and the configured MCP approval policy must authorize arming;
+  an unapproved model decision is insufficient.
 - Unknown, malformed, interrupted, partial, blocked, or failed results keep the
   machine on.
 - Every armed job is one-shot, time-limited, and bound to a unique nonce.
@@ -66,6 +80,10 @@ DoneThen uses these rules:
 - Dry-run is the default during setup and testing.
 - DoneThen never executes model-provided post-task command strings.
 - Adapters report lifecycle events; they do not own shutdown authority.
+- A `Stop` or `SessionEnd` event is never treated as semantic success.
+- Matching Hooks from other sources are preserved. Any other effective `Stop`
+  Hook, overlapping tool Hook, or unknown Hook inventory will block future
+  execute mode by default.
 - Real power jobs are serialized across Windows sessions and unresolved action
   records block later jobs until explicitly cancelled.
 - Duplicate events and process restarts must not execute an action twice.
@@ -83,25 +101,37 @@ DoneThen uses these rules:
 
 ## Codex integrations
 
+### Plugin (primary direction)
+
+The plugin combines three pieces instead of choosing between them:
+
+- the Skill is the user-facing workflow;
+- the MCP server owns typed commands and persisted state;
+- Hooks observe host-provided session and turn boundaries.
+
+Codex starts `donethen mcp` and invokes `donethen hook` automatically from the
+plugin configuration. Those are transport entry points, not programs the user
+opens separately. The Hook handler exits `0`, emits no stdout, never returns a
+continuation or policy decision, and never calls an action backend.
+
+Codex merges matching Hooks from every active source and launches same-event
+command Hooks concurrently. Plugin Hooks also require explicit review and
+trust. Inspect them with `/hooks`; do not use a trust-bypass flag for normal
+DoneThen operation.
+
 ### `codex exec`
 
-The implemented MVP wraps a new non-interactive `codex exec` run. DoneThen
+The earlier MVP wraps a new non-interactive `codex exec` run. DoneThen
 combines the process exit status with a final response constrained by
 `--output-schema`, then validates that response again outside Codex.
 
-The MVP does not attach to an already running Codex Desktop task. App Server
-and Hook support remain separate future adapters.
+This path proves the completion and Windows action boundaries, but it starts a
+second non-interactive run and is no longer the intended everyday UX.
 
 ### Codex App Server
 
 A later adapter will start or resume turns through the Codex App Server, apply
 a per-turn `outputSchema`, and consume the final `turn/completed` event.
-
-### Codex Hooks
-
-An optional plugin adapter may forward `Stop` hook events to the supervisor.
-The hook will never perform a power action directly: `Stop` runs whenever a
-turn stops and does not, by itself, prove semantic task completion.
 
 Relevant upstream documentation:
 
@@ -113,9 +143,12 @@ Relevant upstream documentation:
 
 ## Actions
 
-The implemented MVP supports:
+The legacy CLI supervisor implements:
 
 - Windows shutdown
+
+The plugin currently supports only dry-run observation. `mode: execute` returns
+`execute_unavailable` before creating a job.
 
 Possible later actions include:
 
@@ -133,8 +166,9 @@ than model-generated command strings.
 
 - Windows 10 or 11 on `amd64` for the implemented action backend.
 - Go 1.26 or newer to build the pre-alpha source.
+- A Codex build with plugin, MCP, and Hook support for the plugin preview.
 - An installed and authenticated Codex CLI available as `codex`, or an
-  explicit path supplied with `--codex-path`.
+  explicit path supplied with `--codex-path`, only for the legacy wrapper.
 
 ## Build from source
 
@@ -153,13 +187,61 @@ go version -m bin\donethen.exe
 
 The CLI remains pre-alpha and may change before the first release.
 
+For local plugin development, first review the reversible installation plan:
+
+```powershell
+pwsh -NoProfile -File .\scripts\dev-plugin.ps1 -Action Plan
+```
+
+The development installer stages an ignored local marketplace and uses the
+Codex CLI for install and uninstall. It accepts the exact DoneThen runtime path,
+so the binary does not need to be added to a persistent `PATH`. Mutating actions
+require `-Apply`; the script does not directly rewrite personal Codex or Hook
+configuration. See [Local plugin development](docs/plugin-development.md) for
+the baseline, manual Hook trust, live dry-run, verification, and uninstall
+workflow.
+
 Tagged releases are designed to contain an unsigned Windows `amd64` zip and a
 `SHA256SUMS.txt` file. A checksum detects accidental or malicious file changes;
 it is not a substitute for code signing or independent provenance. Release
 binaries retain Go symbols and embedded Git revision metadata instead of being
 stripped into a smaller, less inspectable executable.
 
-## Usage
+## Plugin development preview
+
+After following the
+[local development workflow](docs/plugin-development.md), starting a new Codex
+task, and reviewing its Hooks with `/hooks`, ask inside the task itself:
+
+```text
+Use $done-then in dry-run mode. When this task is genuinely complete, report
+structured completion and show me the resulting DoneThen status. For this
+dry-run, I explicitly accept structured agent-only completion evidence.
+```
+
+Codex should call `arm` once, keep the returned `job_id`, and call `pause` when
+waiting. It may call `finish` only when all reported checks passed and there is
+no remaining work or approval. A later user prompt invalidates old READY
+evidence. A matching `Stop` records `STOP_OBSERVED`, but the machine remains on
+because execute authority is unavailable.
+
+The current plugin build has no registered external verifier profiles. Without
+that explicit agent-only acceptance, a `done` report ends in
+`VERIFICATION_FAILED` instead of READY.
+
+Recovery does not require the plugin to remain active:
+
+```powershell
+donethen status [job-id]
+donethen cancel [job-id]
+```
+
+Plugin records live under `%LOCALAPPDATA%\DoneThen\plugin`. Status output is
+redacted; persisted event logs hash session and turn identifiers and do not
+store prompts, transcripts, environment variables, nonces, or model response
+bodies.
+
+## Legacy CLI usage
 
 ### Start with dry-run
 
@@ -236,8 +318,16 @@ reviewed source or the report may expose sensitive information.
 ## Repository layout
 
 ```text
-cmd/donethen/             CLI entry point
-internal/cli/             run, cancel, and status commands
+cmd/donethen/             CLI, MCP, and Hook process entry point
+.codex-plugin/            Codex plugin manifest
+.mcp.json                 bundled stdio MCP server declaration
+skills/done-then/         user-facing plugin workflow
+hooks/hooks.json          non-interfering lifecycle observers
+internal/cli/             run, cancel, status, MCP, and Hook commands
+internal/pluginapi/       typed DoneThen MCP operations
+internal/pluginstate/     atomic plugin jobs, indexes, and redacted events
+internal/mcpserver/       dependency-free stdio MCP transport
+internal/hookobserver/    structured Codex lifecycle binding
 internal/codexexec/       validated Codex exec adapter
 internal/completion/      completion envelope and policy
 internal/supervisor/      one-shot job state machine
@@ -247,6 +337,7 @@ internal/actions/         fake and Windows shutdown backends
 internal/platform/        Windows power-job lock
 internal/processgroup/    child-process tree cleanup
 tests/                    contract tests and fake Codex fixture
+scripts/                  reversible plugin development and smoke-test tools
 docs/                     public release and operational guidance
 ```
 
@@ -262,9 +353,18 @@ tracked files such as this README, `CONTRIBUTING.md`, or `docs/`.
 - [x] Add countdown, cancellation, and fail-closed restart recovery.
 - [x] Test the shutdown action boundary through a fake backend in CI.
 - [x] Add license, community health files, and checksum-producing release CI.
+- [x] Add an observe-only Codex plugin, Skill, stdio MCP server, and narrow
+  observer Hooks without modifying existing Hook sources.
+- [x] Bind MCP results to session/turn events and invalidate stale completion
+  evidence on later prompts.
+- [ ] Add pre-registered external verifier profiles for plugin jobs.
+- [ ] Obtain and validate an authoritative effective-Hook inventory at arm,
+  finish, and the final action gate.
+- [ ] Block power mode on overlapping Hooks or other active Codex tasks.
 - [ ] Complete the real Windows countdown-and-cancel release acceptance.
 - [ ] Add the Codex App Server adapter.
-- [ ] Package the optional Codex Hook/plugin adapter.
+- [ ] Enable the plugin power-action supervisor only after all fail-closed gates
+  pass in an isolated alpha profile.
 - [ ] Add Linux and macOS action backends.
 - [ ] Publish signed cross-platform binaries.
 

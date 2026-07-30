@@ -19,12 +19,26 @@ published a tagged release.
 - Windows CI and alpha release packaging workflow.
 - Inspectable Windows release builds that retain Go symbols and embed the
   source Git revision.
+- Observe-only Codex plugin package with a Skill, stdio MCP server, and
+  plugin-owned lifecycle Hooks.
+- Typed plugin `arm`, `finish`, `pause`, `cancel`, and `status` operations.
+- Atomic plugin job records, cross-process state locking, session/turn binding,
+  idempotent Hook event keys, and stale-evidence invalidation.
+- CLI status and cancellation recovery for plugin jobs.
+- Reversible local plugin development install, reinstall, status, and uninstall
+  tooling backed by a disposable ignored marketplace.
+- Observe-only live-smoke tooling for Hook configuration hashes, dry-run job
+  state, lifecycle ordering, redacted events, and the power-action boundary.
 
 ### Security
 
 - Dangerous Codex flags are rejected unless explicitly allowed.
 - Model output cannot select the action executable or action argv.
 - Automated tests never invoke a real power action.
+- Plugin execute mode is rejected before job creation until authoritative Hook
+  and active-task inventory gates exist.
+- Observer Hooks emit no stdout, do not steer Codex, and cannot reach the
+  action backend.
 
 ### Known limitations
 
@@ -32,7 +46,12 @@ published a tagged release.
   has been completed for a public release.
 - Windows `amd64` is the only release target.
 - Release binaries are not code-signed.
-- Existing Codex Desktop tasks cannot be attached or monitored.
+- The plugin can observe its original Codex task, but is dry-run only.
+- The local development scripts have automated dry-run coverage, but a live
+  installed-plugin and trusted-Hook smoke record has not yet been completed.
+- Pre-registered plugin verifier profiles, authoritative effective-Hook
+  inventory, active-task inventory, and the final action supervisor are not
+  implemented.
 - Completion without an external verifier remains an agent self-report and
   requires explicit opt-in in execute mode.
 

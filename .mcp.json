@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "done_then": {
+      "command": "donethen",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

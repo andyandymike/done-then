@@ -4,17 +4,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/andyandymike/done-then/internal/actions"
 	"github.com/andyandymike/done-then/internal/codexexec"
 	"github.com/andyandymike/done-then/internal/completion"
+	"github.com/andyandymike/done-then/internal/identity"
 	"github.com/andyandymike/done-then/internal/platform"
+	"github.com/andyandymike/done-then/internal/pluginstate"
 	"github.com/andyandymike/done-then/internal/store"
 	"github.com/andyandymike/done-then/internal/supervisor"
 )
@@ -39,6 +43,121 @@ func TestVersionCommandReportsConfiguredBuildVersion(t *testing.T) {
 	})
 	if exitCode != 0 || stdout.String() != "donethen 9.8.7-test\n" || stderr.Len() != 0 {
 		t.Fatalf("version exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+}
+
+func TestHookCommandIsSilentForUnrelatedSession(t *testing.T) {
+	root := t.TempDir()
+	deps := testDependencies(root, &actions.FakeBackend{}, nil)
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies(context.Background(), []string{"hook"}, IO{
+		Stdin:  strings.NewReader(`{"session_id":"unbound","turn_id":"turn","hook_event_name":"Stop"}`),
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}, deps)
+	if exitCode != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("hook exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+}
+
+func TestMalformedHookNeverWritesStdoutOrBlocksCodex(t *testing.T) {
+	root := t.TempDir()
+	deps := testDependencies(root, &actions.FakeBackend{}, nil)
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies(context.Background(), []string{"hook"}, IO{
+		Stdin:  strings.NewReader(`not-json`),
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}, deps)
+	if exitCode != 0 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "event dropped") {
+		t.Fatalf("hook exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+}
+
+func TestMCPCommandWritesOnlyJSONRPCResponses(t *testing.T) {
+	root := t.TempDir()
+	deps := testDependencies(root, &actions.FakeBackend{}, nil)
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cli-test","version":"1"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
+	}, "\n")
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies(context.Background(), []string{"mcp"}, IO{
+		Stdin: strings.NewReader(input), Stdout: &stdout, Stderr: &stderr,
+	}, deps)
+	if exitCode != 0 || stderr.Len() != 0 {
+		t.Fatalf("mcp exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	decoder := json.NewDecoder(&stdout)
+	for expectedID := 1; expectedID <= 2; expectedID++ {
+		var response struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      int             `json:"id"`
+			Result  json.RawMessage `json:"result"`
+		}
+		if err := decoder.Decode(&response); err != nil {
+			t.Fatal(err)
+		}
+		if response.JSONRPC != "2.0" || response.ID != expectedID || len(response.Result) == 0 {
+			t.Fatalf("MCP response = %#v", response)
+		}
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		t.Fatalf("unexpected MCP output: %q (%v)", stdout.String(), err)
+	}
+}
+
+func TestStatusAndCancelRecoverObserveOnlyPluginJob(t *testing.T) {
+	root := t.TempDir()
+	state, err := pluginstate.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	job := pluginstate.Job{
+		SchemaVersion:     "1",
+		JobID:             jobIdentity.JobID,
+		NonceHash:         jobIdentity.NonceHash,
+		State:             pluginstate.StateArmPendingBind,
+		ReasonCode:        "awaiting_post_tool_hook",
+		DryRun:            true,
+		Action:            "shutdown",
+		DelaySeconds:      120,
+		ExpiresAt:         now.Add(time.Hour),
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		Generation:        1,
+		VerifierProfile:   "none",
+		HookCompatibility: "not_evaluated",
+	}
+	if err := state.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	deps := testDependencies(root, &actions.FakeBackend{}, nil)
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies(context.Background(), []string{"status", job.JobID}, IO{
+		Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
+	}, deps)
+	if exitCode != 0 || !strings.Contains(stdout.String(), "PLUGIN JOB ID") || !strings.Contains(stdout.String(), "unavailable") {
+		t.Fatalf("plugin status exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDependencies(context.Background(), []string{"cancel", job.JobID}, IO{
+		Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
+	}, deps)
+	if exitCode != 0 || !strings.Contains(stdout.String(), "Observe-only") {
+		t.Fatalf("plugin cancel exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	cancelled, err := state.Load(job.JobID)
+	if err != nil || cancelled.State != pluginstate.StateCancelled {
+		t.Fatalf("cancelled plugin job = %#v, %v", cancelled, err)
 	}
 }
 

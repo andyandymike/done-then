@@ -46,6 +46,10 @@ func runWithDependencies(ctx context.Context, args []string, streams IO, deps de
 	switch args[0] {
 	case "run":
 		return runCommand(ctx, args[1:], streams, deps)
+	case "mcp":
+		return mcpCommand(ctx, args[1:], streams, deps)
+	case "hook":
+		return hookCommand(args[1:], streams, deps)
 	case "cancel":
 		return cancelCommand(ctx, args[1:], streams, deps)
 	case "status":
@@ -62,6 +66,10 @@ func runWithDependencies(ctx context.Context, args []string, streams IO, deps de
 				printCancelUsage(streams.Stdout)
 			case "status":
 				printStatusUsage(streams.Stdout)
+			case "mcp":
+				printMCPUsage(streams.Stdout)
+			case "hook":
+				printHookUsage(streams.Stdout)
 			default:
 				printUsage(streams.Stdout)
 			}
@@ -103,6 +111,16 @@ func printStatusUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "Usage: donethen status [job-id]")
 }
 
+func printMCPUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "Usage: donethen mcp")
+	fmt.Fprintln(writer, "Runs the DoneThen stdio MCP server for the Codex plugin.")
+}
+
+func printHookUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "Usage: donethen hook")
+	fmt.Fprintln(writer, "Consumes one Codex hook event from stdin and emits no model-facing output.")
+}
+
 func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "DoneThen - safe post-task actions for coding agents")
 	fmt.Fprintln(writer)
@@ -110,5 +128,7 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  donethen run [options] -- codex exec [options] PROMPT")
 	fmt.Fprintln(writer, "  donethen cancel [job-id]")
 	fmt.Fprintln(writer, "  donethen status [job-id]")
+	fmt.Fprintln(writer, "  donethen mcp                 Plugin transport (normally launched by Codex)")
+	fmt.Fprintln(writer, "  donethen hook                Plugin observer (normally launched by Codex)")
 	fmt.Fprintln(writer, "  donethen version")
 }
