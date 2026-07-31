@@ -1,5 +1,5 @@
 title: DoneThen
-description: A fail-closed safety layer for post-task actions in coding-agent workflows.
+description: Open-source Windows safety for shutting down your PC only after a Codex task is genuinely complete.
 url: https://andyandymike.github.io
 baseurl: /done-then
 lang: en

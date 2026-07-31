@@ -1,15 +1,15 @@
 # DoneThen
 
-**Safe post-task actions for coding agents.**
+**Safely shut down a Windows PC after a Codex task is truly complete.**
 
 [![CI](https://github.com/andyandymike/done-then/actions/workflows/ci.yml/badge.svg)](https://github.com/andyandymike/done-then/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-DoneThen is an open-source, Windows-first safety layer for post-task actions.
-Its primary design is a Codex plugin: the user asks once inside the original
-task, Codex calls typed DoneThen tools, and lifecycle hooks bind the result to
-that same task. There is no second Codex run and the user does not manually
-launch a watcher window.
+DoneThen is an open-source, Windows-first safety layer for shutting down a PC
+after a coding-agent task is genuinely complete. Its primary design is a Codex
+plugin: the user asks once inside the original task, Codex calls typed DoneThen
+tools, and lifecycle hooks bind the result to that same task. There is no second
+Codex run and the user does not manually launch a watcher window.
 
 The first integration target is OpenAI Codex, while the core completion and
 action model is intended to remain agent-agnostic.

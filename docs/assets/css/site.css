@@ -1546,7 +1546,7 @@ button:disabled,
   }
 
   .hero-copy h1 {
-    font-size: clamp(3.05rem, 15vw, 4.2rem);
+    font-size: clamp(2.45rem, 13vw, 3.3rem);
   }
 
   .hero-lede {

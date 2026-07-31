@@ -204,7 +204,8 @@ real system boundary.
 
 Do:
 
-- Lead with the real problem: a stopped agent turn is not proof of completion.
+- Lead with the user outcome—safe shutdown after Codex genuinely completes—then
+  explain why a stopped agent turn is not proof of completion.
 - Keep observe-only status visible in the hero and interactive result.
 - Use sequence numbers only for genuine lifecycle order.
 - Respect keyboard focus, reduced motion, and narrow viewports.
