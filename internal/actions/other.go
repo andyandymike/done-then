@@ -1,10 +1,9 @@
-//go:build !windows
+//go:build !windows && !linux && !darwin
 
 package actions
 
 import (
 	"context"
-	"errors"
 	"time"
 )
 
@@ -14,10 +13,25 @@ func NewPlatformBackend() Backend {
 	return unsupportedBackend{}
 }
 
-func (unsupportedBackend) ScheduleShutdown(context.Context, time.Duration, string) error {
-	return errors.New("DoneThen v0.1 only supports Windows shutdown")
+func (unsupportedBackend) Preflight(context.Context, PowerRequest) (Capabilities, error) {
+	return Capabilities{
+		Platform:         "unsupported",
+		BackendID:        "unsupported",
+		ExecuteSupported: false,
+		MinimumDelay:     30 * time.Second,
+		MaximumDelay:     time.Hour,
+		Reason:           "DoneThen power actions are not implemented on this platform",
+	}, ErrPlatformUnsupported
 }
 
-func (unsupportedBackend) AbortShutdown(context.Context) error {
-	return errors.New("DoneThen v0.1 only supports Windows shutdown cancellation")
+func (unsupportedBackend) Schedule(context.Context, PowerRequest) (Receipt, error) {
+	return Receipt{}, ErrPlatformUnsupported
+}
+
+func (unsupportedBackend) Cancel(context.Context, Receipt) (CancelResult, error) {
+	return CancelResult{}, ErrPlatformUnsupported
+}
+
+func (unsupportedBackend) Reconcile(context.Context, Receipt) (ReconcileResult, error) {
+	return ReconcileResult{}, ErrPlatformUnsupported
 }

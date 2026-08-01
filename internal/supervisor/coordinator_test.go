@@ -19,6 +19,7 @@ type fakeStore struct {
 	events        []Event
 	cancelChecks  int
 	cancelAt      int
+	cancelErrAt   int
 	failSaveState State
 }
 
@@ -41,7 +42,29 @@ func (s *fakeStore) Save(job Job) error {
 
 func (s *fakeStore) Cancelled(string) (bool, error) {
 	s.cancelChecks++
+	if s.cancelErrAt > 0 && s.cancelChecks >= s.cancelErrAt {
+		return false, errors.New("injected cancellation read failure")
+	}
 	return s.cancelAt > 0 && s.cancelChecks >= s.cancelAt, nil
+}
+
+func TestCoordinatorRollsBackWhenFinalCancellationCheckIsUnreadable(t *testing.T) {
+	jobStore := &fakeStore{cancelErrAt: 5}
+	backend := &actions.FakeBackend{}
+	coordinator := newTestCoordinator(t, Config{
+		DryRun:  false,
+		Agent:   successfulAgent(t, completion.StatusDone),
+		Backend: backend,
+		Store:   jobStore,
+	})
+	outcome := coordinator.Run(context.Background())
+	if outcome.ExitCode != ExitStateError || outcome.ActionMayBeScheduled || outcome.State != StateCancelled {
+		t.Fatalf("Run() = %#v", outcome)
+	}
+	scheduleCalls, cancelCalls, _, _ := backend.Snapshot()
+	if scheduleCalls != 1 || cancelCalls != 1 {
+		t.Fatalf("backend schedule=%d cancel=%d", scheduleCalls, cancelCalls)
+	}
 }
 
 func (s *fakeStore) AppendEvent(event Event) error {
@@ -223,15 +246,59 @@ func TestCoordinatorReportsUncertainActionWhenFinalPersistenceFails(t *testing.T
 		Store:   jobStore,
 	})
 	outcome := coordinator.Run(context.Background())
-	if outcome.ExitCode != ExitStateError || !outcome.ActionMayBeScheduled {
+	if outcome.ExitCode != ExitStateError || outcome.ActionMayBeScheduled || outcome.State != StateCancelled {
 		t.Fatalf("Run() = %#v", outcome)
 	}
-	scheduleCalls, _, _, _ := backend.Snapshot()
-	if scheduleCalls != 1 {
-		t.Fatalf("ScheduleShutdown calls = %d", scheduleCalls)
+	scheduleCalls, cancelCalls, _, _ := backend.Snapshot()
+	if scheduleCalls != 1 || cancelCalls != 1 {
+		t.Fatalf("backend schedule=%d cancel=%d", scheduleCalls, cancelCalls)
 	}
-	if jobStore.job.State != StateActionIntentRecorded {
+	if jobStore.job.State != StateCancelled || jobStore.job.CancelResult == nil {
 		t.Fatalf("persisted state = %s", jobStore.job.State)
+	}
+}
+
+func TestCoordinatorKeepsRecoveryIntentWhenScheduleOutcomeIsUnknown(t *testing.T) {
+	jobStore := &fakeStore{}
+	backend := &actions.FakeBackend{ScheduleErr: errors.New("injected transport failure")}
+	coordinator := newTestCoordinator(t, Config{
+		DryRun:  false,
+		Agent:   successfulAgent(t, completion.StatusDone),
+		Backend: backend,
+		Store:   jobStore,
+	})
+	outcome := coordinator.Run(context.Background())
+	if outcome.ExitCode != ExitActionFailed || outcome.State != StateActionIntentRecorded || !outcome.ActionMayBeScheduled {
+		t.Fatalf("Run() = %#v", outcome)
+	}
+	if jobStore.job.PowerReceipt == nil || jobStore.job.PowerReceipt.ResultCode != -1 || jobStore.job.State != StateActionIntentRecorded {
+		t.Fatalf("persisted recovery intent = %#v", jobStore.job)
+	}
+	scheduleCalls, cancelCalls, _, _ := backend.Snapshot()
+	if scheduleCalls != 1 || cancelCalls != 0 {
+		t.Fatalf("backend schedule=%d cancel=%d", scheduleCalls, cancelCalls)
+	}
+}
+
+func TestCoordinatorSettlesCancellationAfterUnknownScheduleOutcome(t *testing.T) {
+	jobStore := &fakeStore{cancelAt: 5}
+	backend := &actions.FakeBackend{ScheduleErr: errors.New("injected transport failure")}
+	coordinator := newTestCoordinator(t, Config{
+		DryRun:  false,
+		Agent:   successfulAgent(t, completion.StatusDone),
+		Backend: backend,
+		Store:   jobStore,
+	})
+	outcome := coordinator.Run(context.Background())
+	if outcome.ExitCode != ExitCancelled || outcome.State != StateCancelled || outcome.ActionMayBeScheduled {
+		t.Fatalf("Run() = %#v", outcome)
+	}
+	if jobStore.job.CancelResult == nil || !jobStore.job.CancelRequested {
+		t.Fatalf("persisted cancellation = %#v", jobStore.job)
+	}
+	scheduleCalls, cancelCalls, _, _ := backend.Snapshot()
+	if scheduleCalls != 1 || cancelCalls != 1 {
+		t.Fatalf("backend schedule=%d cancel=%d", scheduleCalls, cancelCalls)
 	}
 }
 

@@ -18,6 +18,7 @@ type Runner struct {
 	Args    []string
 	Dir     string
 	Timeout time.Duration
+	Env     []string
 	Stdout  io.Writer
 	Stderr  io.Writer
 }
@@ -40,7 +41,13 @@ func (r Runner) Run(ctx context.Context) (Result, error) {
 	defer cancel()
 	program := resolveProgram(r.Program, r.Dir)
 	command := exec.CommandContext(verifyCtx, program, r.Args...)
+	if err := processgroup.Prepare(command); err != nil {
+		return Result{ExitCode: -1, Duration: time.Since(started)}, fmt.Errorf("prepare verifier process tree: %w", err)
+	}
 	command.Dir = r.Dir
+	if r.Env != nil {
+		command.Env = append([]string(nil), r.Env...)
+	}
 	command.Stdout = r.Stdout
 	command.Stderr = r.Stderr
 	if err := command.Start(); err != nil {

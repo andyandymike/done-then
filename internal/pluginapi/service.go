@@ -7,17 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/andyandymike/done-then/internal/actions"
 	"github.com/andyandymike/done-then/internal/completion"
 	"github.com/andyandymike/done-then/internal/identity"
 	"github.com/andyandymike/done-then/internal/pluginstate"
+	"github.com/andyandymike/done-then/internal/verifierprofile"
 )
 
 const (
 	minimumExpirySeconds = int64(60)
-	maximumExpirySeconds = int64(7 * 24 * 60 * 60)
+	maximumExpirySeconds = int64(24 * 60 * 60)
 )
 
 type Result struct {
@@ -27,32 +30,81 @@ type Result struct {
 }
 
 type Service struct {
-	store *pluginstate.Store
-	now   func() time.Time
+	store                    *pluginstate.Store
+	now                      func() time.Time
+	executeAvailable         bool
+	executeUnavailableReason string
+	workspace                string
+	profiles                 *verifierprofile.Registry
+	launcher                 JobLauncher
+	backend                  actions.Backend
+	powerPolicyFingerprint   string
+	allowAgentOnlySuccess    bool
+}
+
+type JobLauncher interface {
+	Launch(jobID string) (int, error)
+}
+
+type Options struct {
+	ExecuteAvailable         bool
+	ExecuteUnavailableReason string
+	Workspace                string
+	Profiles                 *verifierprofile.Registry
+	Launcher                 JobLauncher
+	Backend                  actions.Backend
+	PowerPolicyFingerprint   string
+	AllowAgentOnlySuccess    bool
 }
 
 func New(state *pluginstate.Store) (*Service, error) {
+	return NewWithOptions(state, Options{})
+}
+
+func NewWithOptions(state *pluginstate.Store, options Options) (*Service, error) {
 	if state == nil {
 		return nil, errors.New("plugin state store is required")
 	}
-	return &Service{store: state, now: time.Now}, nil
+	if options.ExecuteAvailable {
+		if !filepath.IsAbs(options.Workspace) {
+			return nil, errors.New("plugin execute requires an absolute workspace")
+		}
+		if options.Profiles == nil || options.Launcher == nil || options.Backend == nil || options.PowerPolicyFingerprint == "" {
+			return nil, errors.New("plugin execute requires profiles, launcher, and power backend")
+		}
+	}
+	return &Service{
+		store:                    state,
+		now:                      time.Now,
+		executeAvailable:         options.ExecuteAvailable,
+		executeUnavailableReason: options.ExecuteUnavailableReason,
+		workspace:                options.Workspace,
+		profiles:                 options.Profiles,
+		launcher:                 options.Launcher,
+		backend:                  options.Backend,
+		powerPolicyFingerprint:   options.PowerPolicyFingerprint,
+		allowAgentOnlySuccess:    options.AllowAgentOnlySuccess,
+	}, nil
 }
 
-func (s *Service) Call(_ context.Context, name string, raw json.RawMessage) Result {
+func (s *Service) Call(ctx context.Context, name string, raw json.RawMessage) Result {
+	var result Result
 	switch name {
 	case "arm":
-		return s.arm(raw)
+		result = s.arm(raw)
 	case "finish":
-		return s.finish(raw)
+		result = s.finish(ctx, raw)
 	case "pause":
-		return s.pause(raw)
+		result = s.pause(raw)
 	case "cancel":
-		return s.cancel(raw)
+		result = s.cancel(ctx, raw)
 	case "status":
-		return s.status(raw)
+		result = s.status(raw)
 	default:
-		return failure(name, "unknown_tool", "DoneThen does not provide that tool")
+		result = failure(name, "unknown_tool", "DoneThen does not provide that tool")
 	}
+	result.Structured["execute_available"] = s.executeAvailable
+	return result
 }
 
 type armArguments struct {
@@ -75,17 +127,40 @@ func (s *Service) arm(raw json.RawMessage) Result {
 	if args.DelaySeconds < 30 || args.DelaySeconds > 3600 {
 		return failure("arm", "invalid_delay", "delay_seconds must be between 30 and 3600")
 	}
-	if args.ExpiresInSeconds < minimumExpirySeconds || args.ExpiresInSeconds > maximumExpirySeconds {
-		return failure("arm", "invalid_expiry", "expires_in_seconds must be between 60 and 604800")
+	if args.Mode == "execute" && args.DelaySeconds < 120 {
+		return failure("arm", "invalid_delay", "execute mode requires delay_seconds between 120 and 3600")
 	}
-	if args.Mode == "execute" {
-		return failure("arm", "execute_unavailable", "plugin execute mode is disabled until authoritative hook inventory is implemented")
+	if args.ExpiresInSeconds < minimumExpirySeconds || args.ExpiresInSeconds > maximumExpirySeconds {
+		return failure("arm", "invalid_expiry", "expires_in_seconds must be between 60 and 86400")
 	}
 	if args.Mode != "dry_run" {
-		return failure("arm", "invalid_mode", "mode must be dry_run or execute")
+		if args.Mode != "execute" {
+			return failure("arm", "invalid_mode", "mode must be dry_run or execute")
+		}
+		if !s.executeAvailable {
+			reason := s.executeUnavailableReason
+			if reason == "" {
+				reason = "plugin execute mode requires a validated local power policy and host authority"
+			}
+			return failure("arm", "execute_unavailable", reason)
+		}
 	}
-	if args.VerifierProfile != "none" {
+	if args.Mode == "dry_run" && args.VerifierProfile != "none" {
 		return failure("arm", "verifier_profile_unavailable", "this build only supports verifier_profile=none in plugin dry-run mode")
+	}
+	var verifierFingerprint string
+	if args.Mode == "execute" {
+		if args.VerifierProfile == "none" {
+			if !args.AllowAgentOnlySuccess || !s.allowAgentOnlySuccess {
+				return failure("arm", "independent_evidence_required", "execute requires a registered verifier profile or explicit allow_agent_only_success")
+			}
+		} else {
+			profile, err := s.profiles.Load(args.VerifierProfile)
+			if err != nil {
+				return failure("arm", "verifier_profile_unavailable", "the registered verifier profile is unavailable or invalid")
+			}
+			verifierFingerprint = profile.Fingerprint
+		}
 	}
 	jobIdentity, err := identity.New()
 	if err != nil {
@@ -93,24 +168,47 @@ func (s *Service) arm(raw json.RawMessage) Result {
 	}
 	now := s.now().UTC()
 	job := pluginstate.Job{
-		SchemaVersion:         "1",
-		JobID:                 jobIdentity.JobID,
-		NonceHash:             jobIdentity.NonceHash,
-		State:                 pluginstate.StateArmPendingBind,
-		ReasonCode:            "awaiting_post_tool_hook",
-		DryRun:                true,
-		Action:                args.Action,
-		DelaySeconds:          args.DelaySeconds,
-		ExpiresAt:             now.Add(time.Duration(args.ExpiresInSeconds) * time.Second),
-		CreatedAt:             now,
-		UpdatedAt:             now,
-		Generation:            1,
-		VerifierProfile:       args.VerifierProfile,
-		AllowAgentOnlySuccess: args.AllowAgentOnlySuccess,
-		HookCompatibility:     "not_evaluated",
+		SchemaVersion:          pluginstate.CurrentSchemaVersion,
+		JobID:                  jobIdentity.JobID,
+		NonceHash:              jobIdentity.NonceHash,
+		State:                  pluginstate.StateArmPendingBind,
+		ReasonCode:             "awaiting_post_tool_hook",
+		DryRun:                 args.Mode == "dry_run",
+		Action:                 args.Action,
+		DelaySeconds:           args.DelaySeconds,
+		ExpiresAt:              now.Add(time.Duration(args.ExpiresInSeconds) * time.Second),
+		CreatedAt:              now,
+		UpdatedAt:              now,
+		Generation:             1,
+		VerifierProfile:        args.VerifierProfile,
+		AllowAgentOnlySuccess:  args.AllowAgentOnlySuccess,
+		HookCompatibility:      "not_evaluated",
+		WorkspaceCWD:           s.workspace,
+		VerifierFingerprint:    verifierFingerprint,
+		PowerPolicyFingerprint: s.powerPolicyFingerprint,
 	}
 	if err := s.store.Create(job); err != nil {
 		return failure("arm", "state_error", "could not persist the DoneThen job")
+	}
+	if !job.DryRun {
+		pid, launchErr := s.launcher.Launch(job.JobID)
+		if launchErr != nil {
+			failed, _, _ := s.store.UpdateJob(job.JobID, "supervisor.launch_failed", "", func(job *pluginstate.Job, _ time.Time) error {
+				job.Generation++
+				job.State = pluginstate.StateOrphaned
+				job.ReasonCode = "supervisor_launch_failed"
+				return nil
+			})
+			return failureWithJob("arm", "supervisor_unavailable", "the one-shot supervisor could not be started", failed)
+		}
+		job, _, err = s.store.UpdateJob(job.JobID, "supervisor.launched", "", func(job *pluginstate.Job, _ time.Time) error {
+			job.SupervisorPID = pid
+			return nil
+		})
+		if err != nil {
+			return failureWithJob("arm", "state_error", "the supervisor started but its identity could not be persisted; cancel this job", job)
+		}
+		return success("arm", job, "Execute job armed; the one-shot supervisor is waiting for hook binding and host evidence")
 	}
 	return success("arm", job, "Dry-run armed; waiting for the PostToolUse observer to bind this task")
 }
@@ -120,7 +218,7 @@ type finishArguments struct {
 	Completion json.RawMessage `json:"completion"`
 }
 
-func (s *Service) finish(raw json.RawMessage) Result {
+func (s *Service) finish(ctx context.Context, raw json.RawMessage) Result {
 	var args finishArguments
 	if err := decodeArguments(raw, &args); err != nil {
 		return failure("finish", "invalid_arguments", err.Error())
@@ -134,15 +232,18 @@ func (s *Service) finish(raw json.RawMessage) Result {
 	}
 	decision := completion.Evaluate(envelope)
 	evidenceHash := identity.SHA256(args.Completion)
+	shouldVerify := false
 	job, _, err := s.store.UpdateJob(args.JobID, "mcp.finish", "", func(job *pluginstate.Job, now time.Time) error {
 		if expire(job, now) {
 			return nil
 		}
-		if job.State != pluginstate.StateArmed {
-			return fmt.Errorf("job is in state %s; finish requires ARMED", job.State)
+		if job.State != pluginstate.StateArmed && job.State != pluginstate.StateHostMonitoring {
+			return fmt.Errorf("job is in state %s; finish requires ARMED or HOST_MONITORING", job.State)
 		}
 		job.Generation++
 		job.CompletionStatus = string(envelope.Status)
+		job.VerifierPassed = false
+		job.VerifierExitCode = nil
 		if !decision.Done {
 			job.State = pluginstate.StateNotDone
 			job.ReasonCode = "completion_policy_rejected"
@@ -159,12 +260,20 @@ func (s *Service) finish(raw json.RawMessage) Result {
 			job.FinishObserved = false
 			return nil
 		}
-		job.State = pluginstate.StateReadyPendingStop
-		job.ReasonCode = "completion_policy_passed"
 		job.CompletionEvidenceHash = evidenceHash
 		job.ReadyTurnID = job.CurrentTurnID
 		job.StopTurnID = ""
 		job.FinishObserved = false
+		job.HookFingerprintH2 = ""
+		job.HookFingerprintH3 = ""
+		if job.VerifierProfile == "none" {
+			job.State = pluginstate.StateReadyPendingStop
+			job.ReasonCode = "completion_policy_passed_agent_only"
+			return nil
+		}
+		job.State = pluginstate.StateVerifying
+		job.ReasonCode = "verifier_started"
+		shouldVerify = true
 		return nil
 	})
 	if err != nil {
@@ -178,6 +287,57 @@ func (s *Service) finish(raw json.RawMessage) Result {
 	}
 	if job.State == pluginstate.StateVerificationFailed {
 		return failureWithJob("finish", "independent_evidence_required", "verifier_profile=none requires explicit allow_agent_only_success", job)
+	}
+	if shouldVerify {
+		expectedGeneration := job.Generation
+		verifyExit := -1
+		verifyErr := errors.New("registered verifier profile is unavailable")
+		profile, loadErr := s.profiles.Load(job.VerifierProfile)
+		if loadErr == nil && profile.Fingerprint != job.VerifierFingerprint {
+			loadErr = errors.New("registered verifier profile changed after arm")
+		}
+		if loadErr == nil {
+			runner, runnerErr := profile.Runner(job.WorkspaceCWD, io.Discard, io.Discard)
+			if runnerErr == nil {
+				result, runErr := runner.Run(ctx)
+				verifyExit = result.ExitCode
+				verifyErr = runErr
+			} else {
+				verifyErr = runnerErr
+			}
+		} else {
+			verifyErr = loadErr
+		}
+		job, _, err = s.store.UpdateJob(args.JobID, "mcp.finish.verifier", "", func(job *pluginstate.Job, now time.Time) error {
+			if expire(job, now) || job.State == pluginstate.StateCancelled {
+				return nil
+			}
+			if job.State != pluginstate.StateVerifying || job.Generation != expectedGeneration {
+				return errors.New("job changed while the verifier was running")
+			}
+			job.VerifierExitCode = &verifyExit
+			if verifyErr != nil || verifyExit != 0 {
+				job.State = pluginstate.StateVerificationFailed
+				job.ReasonCode = "verifier_failed"
+				job.VerifierPassed = false
+				job.CompletionEvidenceHash = ""
+				job.ReadyTurnID = ""
+				return nil
+			}
+			job.VerifierPassed = true
+			job.State = pluginstate.StateReadyPendingStop
+			job.ReasonCode = "completion_and_verifier_passed"
+			return nil
+		})
+		if err != nil {
+			return failure("finish", "state_error", err.Error())
+		}
+		if job.State == pluginstate.StateVerificationFailed {
+			return failureWithJob("finish", "verification_failed", "the registered verifier did not pass; no action can run", job)
+		}
+		if job.State == pluginstate.StateCancelled || job.State == pluginstate.StateExpired {
+			return failureWithJob("finish", "job_inactive", "the job became inactive while verification was running", job)
+		}
 	}
 	return success("finish", job, "Completion policy passed; waiting for the matching Stop observer; no action was scheduled")
 }
@@ -199,7 +359,8 @@ func (s *Service) pause(raw json.RawMessage) Result {
 		if expire(job, now) {
 			return nil
 		}
-		if job.State != pluginstate.StateArmed && job.State != pluginstate.StateReadyPendingStop && job.State != pluginstate.StateStopObserved {
+		if job.State != pluginstate.StateArmed && job.State != pluginstate.StateHostMonitoring &&
+			job.State != pluginstate.StateReadyPendingStop && job.State != pluginstate.StateStopObserved {
 			return fmt.Errorf("job is in state %s and cannot be paused", job.State)
 		}
 		job.Generation++
@@ -221,31 +382,81 @@ type jobArguments struct {
 	JobID string `json:"job_id"`
 }
 
-func (s *Service) cancel(raw json.RawMessage) Result {
+func (s *Service) cancel(ctx context.Context, raw json.RawMessage) Result {
 	var args jobArguments
 	if err := decodeArguments(raw, &args); err != nil {
 		return failure("cancel", "invalid_arguments", err.Error())
+	}
+	current, err := s.store.Load(args.JobID)
+	if err != nil {
+		return failure("cancel", "state_error", "could not load the DoneThen job")
+	}
+	intentAtRequest := current.State == pluginstate.StateActionIntent
+	var cancelResult *actions.CancelResult
+	unresolvedPower := pluginstate.HasUnresolvedPowerAction(current)
+	if unresolvedPower {
+		current, _, err = s.store.UpdateJob(args.JobID, "mcp.cancel.requested", "", func(job *pluginstate.Job, _ time.Time) error {
+			if !pluginstate.HasUnresolvedPowerAction(*job) {
+				return nil
+			}
+			job.Generation++
+			job.CancelRequested = true
+			job.CancelReason = "mcp_cancelled_by_user"
+			job.ReasonCode = "power_cancel_requested"
+			return nil
+		})
+		if err != nil {
+			return failureWithJob("cancel", "state_error", "could not persist the power cancellation request", current)
+		}
+		if s.backend == nil {
+			return failureWithJob("cancel", "power_backend_unavailable", "a power action may be active but the backend is unavailable; use the CLI cancellation path", current)
+		}
+		receipt, receiptErr := pluginstate.RecoveryReceipt(current)
+		if receiptErr != nil {
+			return failureWithJob("cancel", "power_receipt_unavailable", "the unresolved power action has no valid recovery receipt; use the CLI recovery path", current)
+		}
+		result, cancelErr := s.backend.Cancel(ctx, receipt)
+		cancelResult = &result
+		if cancelErr != nil && !errors.Is(cancelErr, actions.ErrNoShutdownInProgress) {
+			return failureWithJob("cancel", "power_cancel_failed", "the power backend did not confirm cancellation; retry immediately", current)
+		}
 	}
 	job, _, err := s.store.UpdateJob(args.JobID, "mcp.cancel", "", func(job *pluginstate.Job, now time.Time) error {
 		if job.State == pluginstate.StateCancelled {
 			return nil
 		}
-		if job.State.IsTerminal() {
+		if intentAtRequest && pluginstate.HasUnresolvedPowerAction(*job) {
+			job.CancelRequested = true
+			job.CancelReason = "mcp_cancelled_by_user"
+			job.ReasonCode = "cancel_requested_pending_scheduler_settlement"
+			job.CancelResult = cancelResult
+			return nil
+		}
+		if job.State.IsTerminal() && !pluginstate.HasUnresolvedPowerAction(*job) {
 			return nil
 		}
 		job.Generation++
 		job.State = pluginstate.StateCancelled
 		job.ReasonCode = "cancelled_by_user"
+		job.CancelRequested = true
+		job.CancelReason = "mcp_cancelled_by_user"
+		job.CancelResult = cancelResult
 		clearCompletion(job)
 		return nil
 	})
 	if err != nil {
 		return failure("cancel", "state_error", err.Error())
 	}
+	if intentAtRequest && pluginstate.HasUnresolvedPowerAction(job) {
+		return success("cancel", job, "Cancellation is persisted at the action boundary; the supervisor must settle the unresolved scheduler call before this job becomes terminal")
+	}
 	if job.State != pluginstate.StateCancelled {
 		return success("cancel", job, "Job was already terminal; no power action is active")
 	}
-	return success("cancel", job, "Job cancelled; plugin mode never scheduled a power action")
+	if cancelResult != nil {
+		return success("cancel", job, fmt.Sprintf("Job cancelled; the power countdown cancellation scope was %s", cancelResult.Scope))
+	}
+	return success("cancel", job, "Job cancelled before any power action was scheduled")
 }
 
 func (s *Service) status(raw json.RawMessage) Result {
@@ -365,7 +576,7 @@ func allowedPauseReason(reason string) bool {
 }
 
 func expire(job *pluginstate.Job, now time.Time) bool {
-	if job.State.IsActive() && job.Expired(now) {
+	if job.State.IsActive() && job.State != pluginstate.StateActionIntent && job.State != pluginstate.StateActionScheduled && job.Expired(now) {
 		job.Generation++
 		job.State = pluginstate.StateExpired
 		job.ReasonCode = "arm_expired"
@@ -381,6 +592,14 @@ func clearCompletion(job *pluginstate.Job) {
 	job.ReadyTurnID = ""
 	job.StopTurnID = ""
 	job.FinishObserved = false
+	job.VerifierPassed = false
+	job.VerifierExitCode = nil
+	job.HookFingerprintH1 = ""
+	job.HookFingerprintH2 = ""
+	job.HookFingerprintH3 = ""
+	job.HookCompatibility = "not_evaluated"
+	job.HostSnapshotReason = ""
+	job.HostInstanceID = ""
 }
 
 func SanitizeError(err error) string {

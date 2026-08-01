@@ -50,10 +50,20 @@ func runWithDependencies(ctx context.Context, args []string, streams IO, deps de
 		return mcpCommand(ctx, args[1:], streams, deps)
 	case "hook":
 		return hookCommand(args[1:], streams, deps)
+	case "supervise":
+		return superviseCommand(ctx, args[1:], streams, deps)
 	case "cancel":
 		return cancelCommand(ctx, args[1:], streams, deps)
 	case "status":
 		return statusCommand(args[1:], streams, deps)
+	case "reconcile":
+		return reconcileCommand(ctx, args[1:], streams, deps)
+	case "doctor":
+		return doctorCommand(ctx, args[1:], streams, deps)
+	case "policy":
+		return policyCommand(ctx, args[1:], streams, deps)
+	case "verifier":
+		return verifierCommand(args[1:], streams, deps)
 	case "version", "--version", "-version":
 		fmt.Fprintf(streams.Stdout, "donethen %s\n", Version)
 		return 0
@@ -66,6 +76,14 @@ func runWithDependencies(ctx context.Context, args []string, streams IO, deps de
 				printCancelUsage(streams.Stdout)
 			case "status":
 				printStatusUsage(streams.Stdout)
+			case "reconcile":
+				printReconcileUsage(streams.Stdout)
+			case "doctor":
+				printDoctorUsage(streams.Stdout)
+			case "policy":
+				printPolicyUsage(streams.Stdout)
+			case "verifier":
+				printVerifierUsage(streams.Stdout)
 			case "mcp":
 				printMCPUsage(streams.Stdout)
 			case "hook":
@@ -90,7 +108,7 @@ func printRunUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "Core options:")
 	fmt.Fprintln(writer, "  --action shutdown              Required action")
 	fmt.Fprintln(writer, "  --dry-run                      Run all gates without a power action (default)")
-	fmt.Fprintln(writer, "  --execute                      Allow the real Windows action backend")
+	fmt.Fprintln(writer, "  --execute                      Allow the configured platform action backend")
 	fmt.Fprintln(writer, "  --delay 2m                     Cancellable shutdown delay (30s to 1h)")
 	fmt.Fprintln(writer, "  --verify-program PATH          Trusted verifier executable")
 	fmt.Fprintln(writer, "  --verify-arg VALUE             Verifier argument; repeat as needed")
@@ -111,6 +129,28 @@ func printStatusUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "Usage: donethen status [job-id]")
 }
 
+func printReconcileUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "Usage: donethen reconcile <job-id>")
+	fmt.Fprintln(writer, "Reads platform evidence for a scheduled power job without retrying the action.")
+}
+
+func printDoctorUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "Usage: donethen doctor [--json]")
+	fmt.Fprintln(writer, "Runs read-only capability checks and never schedules or cancels a power action.")
+}
+
+func printPolicyUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "Usage: donethen policy capture --plugin-id ID [--codex-path PATH] [--allow-agent-only-success] [--apply]")
+	fmt.Fprintln(writer, "Reads the effective Hook inventory. Without --apply it is plan-only and writes nothing.")
+}
+
+func printVerifierUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "Usage:")
+	fmt.Fprintln(writer, "  donethen verifier list")
+	fmt.Fprintln(writer, "  donethen verifier add --id ID --program PATH [--arg VALUE ...] [--timeout 10m] [--program-sha256 HASH] [--apply]")
+	fmt.Fprintln(writer, "Without --apply, verifier add validates and prints a plan without writing files.")
+}
+
 func printMCPUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "Usage: donethen mcp")
 	fmt.Fprintln(writer, "Runs the DoneThen stdio MCP server for the Codex plugin.")
@@ -128,6 +168,10 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  donethen run [options] -- codex exec [options] PROMPT")
 	fmt.Fprintln(writer, "  donethen cancel [job-id]")
 	fmt.Fprintln(writer, "  donethen status [job-id]")
+	fmt.Fprintln(writer, "  donethen reconcile <job-id>  Read-only post-boot action reconciliation")
+	fmt.Fprintln(writer, "  donethen doctor              Read-only capability and safety diagnostics")
+	fmt.Fprintln(writer, "  donethen policy capture ...  Plan or record reviewed identity for future Plugin execute")
+	fmt.Fprintln(writer, "  donethen verifier ...        Plan, install, or list fixed verifier profiles")
 	fmt.Fprintln(writer, "  donethen mcp                 Plugin transport (normally launched by Codex)")
 	fmt.Fprintln(writer, "  donethen hook                Plugin observer (normally launched by Codex)")
 	fmt.Fprintln(writer, "  donethen version")

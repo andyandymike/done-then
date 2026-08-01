@@ -115,6 +115,8 @@ jobs:
           }
 
           Copy-Item README.md, LICENSE, CHANGELOG.md -Destination $packageDir
+          Copy-Item internal/capability/manifest.json -Destination (Join-Path $packageDir 'CAPABILITIES.json')
+          $buildInfo | Out-File -FilePath (Join-Path $packageDir 'BUILDINFO.txt') -Encoding utf8
           $archive = Join-Path $distDir "$packageName.zip"
           Compress-Archive -Path (Join-Path $packageDir '*') -DestinationPath $archive
 
@@ -125,11 +127,23 @@ jobs:
           } finally {
             $zip.Dispose()
           }
-          $expectedEntries = @('CHANGELOG.md', 'LICENSE', 'README.md', 'donethen.exe')
+          $expectedEntries = @('BUILDINFO.txt', 'CAPABILITIES.json', 'CHANGELOG.md', 'LICENSE', 'README.md', 'donethen.exe')
           if (Compare-Object $expectedEntries $entries) {
             Write-Error "Unexpected archive entries: $($entries -join ', ')"
             exit 1
           }
+
+          $created = (git show -s --format=%cI HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sbom = "$archive.spdx.json"
+          $sbomArguments = @(
+            'run', './cmd/donethen-sbom',
+            '--artifact', $archive, '--binary', $binary, '--output', $sbom,
+            '--version', $env:RELEASE_VERSION,
+            '--goos', 'windows', '--goarch', 'amd64', '--created', $created
+          )
+          & go @sbomArguments
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
           "$hash  $([System.IO.Path]::GetFileName($archive))" |
@@ -140,6 +154,7 @@ jobs:
         with:
           subject-path: |
             dist/*.zip
+            dist/*.spdx.json
             dist/SHA256SUMS.txt
 
       - name: Upload workflow artifact
@@ -148,13 +163,138 @@ jobs:
           name: ${{ steps.release_metadata.outputs.artifact_name }}
           path: |
             dist/*.zip
+            dist/*.spdx.json
             dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  build_portable:
+    name: Build ${{ matrix.goos }} ${{ matrix.goarch }}
+    needs: build_windows_amd64
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.build_windows_amd64.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: arm64
+            archive: zip
+          - goos: linux
+            goarch: amd64
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            archive: tar.gz
+          - goos: darwin
+            goarch: amd64
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            archive: tar.gz
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build and package portable artifact
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          package_name="donethen_${RELEASE_VERSION}_${GOOS}_${GOARCH}"
+          package_dir="$RUNNER_TEMP/$package_name"
+          dist_dir="$GITHUB_WORKSPACE/dist"
+          mkdir -p "$package_dir" "$dist_dir"
+
+          binary_name="donethen"
+          if [[ "$GOOS" == "windows" ]]; then
+            binary_name="donethen.exe"
+          fi
+          ldflags="-X github.com/andyandymike/done-then/internal/cli.Version=$RELEASE_VERSION"
+          go build -trimpath -ldflags "$ldflags" -o "$package_dir/$binary_name" ./cmd/donethen
+
+          if [[ "$GOOS" == "linux" ]]; then
+            go build -trimpath -o "$package_dir/donethen-powerd" ./cmd/donethen-powerd
+            cp scripts/install-linux.sh "$package_dir/install-linux.sh"
+            cp packaging/linux/donethen-powerd.service "$package_dir/donethen-powerd.service"
+            cp packaging/linux/donethen.conf "$package_dir/donethen.conf"
+            chmod 0755 "$package_dir/donethen" "$package_dir/donethen-powerd" "$package_dir/install-linux.sh"
+          fi
+
+          cp README.md LICENSE CHANGELOG.md "$package_dir/"
+          cp internal/capability/manifest.json "$package_dir/CAPABILITIES.json"
+          go version -m "$package_dir/$binary_name" > "$package_dir/BUILDINFO.txt"
+          expected_revision="$(git rev-parse HEAD)"
+          grep -F "vcs.revision=$expected_revision" "$package_dir/BUILDINFO.txt" >/dev/null
+          grep -F 'vcs.modified=false' "$package_dir/BUILDINFO.txt" >/dev/null
+
+          if [[ "$GOOS" == "linux" ]]; then
+            expected=$'BUILDINFO.txt\nCAPABILITIES.json\nCHANGELOG.md\nLICENSE\nREADME.md\ndonethen\ndonethen-powerd\ndonethen-powerd.service\ndonethen.conf\ninstall-linux.sh'
+          elif [[ "$GOOS" == "windows" ]]; then
+            expected=$'BUILDINFO.txt\nCAPABILITIES.json\nCHANGELOG.md\nLICENSE\nREADME.md\ndonethen.exe'
+          else
+            expected=$'BUILDINFO.txt\nCAPABILITIES.json\nCHANGELOG.md\nLICENSE\nREADME.md\ndonethen'
+          fi
+          actual="$(find "$package_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+          if [[ "$actual" != "$(printf '%s\n' "$expected" | sort)" ]]; then
+            printf 'Unexpected package contents:\n%s\n' "$actual" >&2
+            exit 1
+          fi
+
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            archive_name="$package_name.zip"
+            (cd "$RUNNER_TEMP" && zip -q -r "$dist_dir/$archive_name" "$package_name")
+          else
+            archive_name="$package_name.tar.gz"
+            tar -C "$RUNNER_TEMP" -czf "$dist_dir/$archive_name" "$package_name"
+          fi
+          created="$(git show -s --format=%cI HEAD)"
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go run ./cmd/donethen-sbom --artifact "$dist_dir/$archive_name" --binary "$package_dir/$binary_name" --output "$dist_dir/$archive_name.spdx.json" --version "$RELEASE_VERSION" --goos "$GOOS" --goarch "$GOARCH" --created "$created"
+          (cd "$dist_dir" && sha256sum "$archive_name" > "$package_name.sha256")
+
+      - name: Attest portable release assets
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: |
+            dist/*.${{ matrix.archive }}
+            dist/*.spdx.json
+            dist/*.sha256
+
+      - name: Upload portable workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: donethen-${{ env.RELEASE_VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.${{ matrix.archive }}
+            dist/*.spdx.json
+            dist/*.sha256
           if-no-files-found: error
           retention-days: 30
 
   publish:
     name: Publish GitHub release
-    needs: build_windows_amd64
+    needs:
+      - build_windows_amd64
+      - build_portable
     runs-on: windows-latest
     timeout-minutes: 10
     permissions:
@@ -166,47 +306,118 @@ jobs:
       RELEASE_PRERELEASE: ${{ needs.build_windows_amd64.outputs.prerelease }}
 
     steps:
-      - name: Download verified workflow artifact
+      - name: Download verified workflow artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: ${{ needs.build_windows_amd64.outputs.artifact_name }}
+          pattern: donethen-${{ needs.build_windows_amd64.outputs.version }}-*
+          merge-multiple: true
           path: dist
 
       - name: Verify downloaded release assets
         shell: pwsh
         run: |
-          $archiveName = "donethen_$($env:RELEASE_VERSION)_windows_amd64.zip"
-          $archive = Join-Path 'dist' $archiveName
-          $sums = Join-Path 'dist' 'SHA256SUMS.txt'
-          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
-            Write-Error "Release archive is missing: $archive"
+          $expectedArchives = @(
+            "donethen_$($env:RELEASE_VERSION)_windows_amd64.zip",
+            "donethen_$($env:RELEASE_VERSION)_windows_arm64.zip",
+            "donethen_$($env:RELEASE_VERSION)_linux_amd64.tar.gz",
+            "donethen_$($env:RELEASE_VERSION)_linux_arm64.tar.gz",
+            "donethen_$($env:RELEASE_VERSION)_darwin_amd64.tar.gz",
+            "donethen_$($env:RELEASE_VERSION)_darwin_arm64.tar.gz"
+          ) | Sort-Object
+          $actualArchives = @(Get-ChildItem -LiteralPath dist -File | Where-Object {
+            $_.Name.EndsWith('.zip') -or $_.Name.EndsWith('.tar.gz')
+          } | Select-Object -ExpandProperty Name | Sort-Object)
+          if (Compare-Object $expectedArchives $actualArchives) {
+            Write-Error "Release archive set is incomplete or unexpected: $($actualArchives -join ', ')"
             exit 1
           }
-          if (-not (Test-Path -LiteralPath $sums -PathType Leaf)) {
-            Write-Error "Checksum file is missing: $sums"
+
+          $expectedSBOMs = @($expectedArchives | ForEach-Object { "$_.spdx.json" } | Sort-Object)
+          $actualSBOMs = @(Get-ChildItem -LiteralPath dist -File -Filter '*.spdx.json' |
+            Select-Object -ExpandProperty Name | Sort-Object)
+          if (Compare-Object $expectedSBOMs $actualSBOMs) {
+            Write-Error "Release SBOM set is incomplete or unexpected: $($actualSBOMs -join ', ')"
             exit 1
           }
-          $line = (Get-Content -LiteralPath $sums -Raw).Trim()
-          $pattern = "^([0-9a-f]{64})  $([regex]::Escape($archiveName))$"
-          if ($line -cnotmatch $pattern) {
-            Write-Error 'SHA256SUMS.txt has an unexpected format or filename.'
+          foreach ($archiveName in $expectedArchives) {
+            $sbomPath = Join-Path 'dist' "$archiveName.spdx.json"
+            try {
+              $sbom = Get-Content -LiteralPath $sbomPath -Raw | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+              Write-Error "Invalid SPDX JSON for $archiveName."
+              exit 1
+            }
+            if ($sbom.spdxVersion -cne 'SPDX-2.3' -or
+                $sbom.dataLicense -cne 'CC0-1.0' -or
+                $sbom.SPDXID -cne 'SPDXRef-DOCUMENT') {
+              Write-Error "Unexpected SPDX document header for $archiveName."
+              exit 1
+            }
+            $mainPackages = @($sbom.packages | Where-Object {
+              $_.SPDXID -ceq 'SPDXRef-Package-DoneThen' -and
+              $_.licenseDeclared -ceq 'Apache-2.0'
+            })
+            if ($mainPackages.Count -ne 1) {
+              Write-Error "SBOM primary package is missing or ambiguous for $archiveName."
+              exit 1
+            }
+            $files = @($sbom.files | Where-Object { $_.fileName -ceq "./$archiveName" })
+            if ($files.Count -ne 1) {
+              Write-Error "SBOM does not describe exactly one matching archive: $archiveName."
+              exit 1
+            }
+            $sha256Entries = @($files[0].checksums | Where-Object { $_.algorithm -ceq 'SHA256' })
+            $actualHash = (Get-FileHash -Algorithm SHA256 (Join-Path 'dist' $archiveName)).Hash.ToLowerInvariant()
+            if ($sha256Entries.Count -ne 1 -or $sha256Entries[0].checksumValue -cne $actualHash) {
+              Write-Error "SBOM checksum mismatch for $archiveName."
+              exit 1
+            }
+          }
+
+          $checksumFiles = @(Get-ChildItem -LiteralPath dist -File | Where-Object {
+            $_.Name -eq 'SHA256SUMS.txt' -or $_.Name.EndsWith('.sha256')
+          })
+          $verifiedLines = [System.Collections.Generic.List[string]]::new()
+          foreach ($checksumFile in $checksumFiles) {
+            foreach ($line in @(Get-Content -LiteralPath $checksumFile.FullName)) {
+              $line = $line.Trim()
+              if ($line -notmatch '^([0-9a-f]{64})  ([A-Za-z0-9_.-]+)$') {
+                Write-Error "Invalid checksum line in $($checksumFile.Name)."
+                exit 1
+              }
+              $archiveName = $Matches[2]
+              if ($expectedArchives -cnotcontains $archiveName) {
+                Write-Error "Checksum references an unexpected archive: $archiveName"
+                exit 1
+              }
+              $actualHash = (Get-FileHash -Algorithm SHA256 (Join-Path 'dist' $archiveName)).Hash.ToLowerInvariant()
+              if ($actualHash -cne $Matches[1]) {
+                Write-Error "Release archive checksum mismatch for $archiveName."
+                exit 1
+              }
+              $verifiedLines.Add("$actualHash  $archiveName")
+            }
+          }
+          $combined = @($verifiedLines | Sort-Object -Unique)
+          if ($combined.Count -ne $expectedArchives.Count) {
+            Write-Error 'Not every release archive has exactly one verified checksum.'
             exit 1
           }
-          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          if ($actual -cne $Matches[1]) {
-            Write-Error "Release archive checksum mismatch: expected $($Matches[1]), got $actual"
-            exit 1
-          }
+          $combined | Out-File -FilePath 'dist/SHA256SUMS.txt' -Encoding ascii
 
       - name: Publish GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $archive = "dist/donethen_$($env:RELEASE_VERSION)_windows_amd64.zip"
-          $arguments = @(
-            'release', 'create', $env:RELEASE_TAG,
-            $archive, 'dist/SHA256SUMS.txt',
+          $assets = @(Get-ChildItem -LiteralPath dist -File | Where-Object {
+            $_.Name.EndsWith('.zip') -or $_.Name.EndsWith('.tar.gz') -or
+            $_.Name.EndsWith('.spdx.json')
+          } | Sort-Object Name | Select-Object -ExpandProperty FullName)
+          $arguments = @('release', 'create', $env:RELEASE_TAG)
+          $arguments += $assets
+          $arguments += @(
+            (Resolve-Path 'dist/SHA256SUMS.txt').Path,
             '--verify-tag', '--generate-notes',
             '--title', "DoneThen $($env:RELEASE_VERSION)"
           )

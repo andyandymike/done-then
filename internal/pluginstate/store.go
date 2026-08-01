@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andyandymike/done-then/internal/filetrust"
 	"github.com/andyandymike/done-then/internal/identity"
 	basestore "github.com/andyandymike/done-then/internal/store"
 )
@@ -57,6 +58,13 @@ type Status struct {
 	HookCompatibility string `json:"hook_compatibility"`
 	ExecuteAvailable  bool   `json:"execute_available"`
 	CancelCommand     string `json:"cancel_command"`
+	HostSnapshots     string `json:"host_snapshots"`
+	VerifierStatus    string `json:"verifier_status"`
+	ScheduledFor      string `json:"scheduled_for,omitempty"`
+	PowerBackend      string `json:"power_backend,omitempty"`
+	CancelScope       string `json:"cancel_scope,omitempty"`
+	CancelRequested   bool   `json:"cancel_requested"`
+	CancelReason      string `json:"cancel_reason,omitempty"`
 }
 
 func New(dataRoot string) (*Store, error) {
@@ -71,9 +79,19 @@ func New(dataRoot string) (*Store, error) {
 		root: filepath.Join(absolute, "plugin"),
 		now:  time.Now,
 	}
-	for _, directory := range []string{state.jobsDir(), state.sessionsDir(), state.logsDir()} {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			return nil, fmt.Errorf("create plugin state directory: %w", err)
+	directories := []struct {
+		path  string
+		label string
+	}{
+		{absolute, "DoneThen data root"},
+		{state.root, "plugin state root"},
+		{state.jobsDir(), "plugin job directory"},
+		{state.sessionsDir(), "plugin session directory"},
+		{state.logsDir(), "plugin event directory"},
+	}
+	for _, directory := range directories {
+		if err := filetrust.EnsureOwnerControlledDirectory(directory.path, directory.label); err != nil {
+			return nil, err
 		}
 	}
 	return state, nil
@@ -84,6 +102,9 @@ func (s *Store) Root() string {
 }
 
 func (s *Store) Create(job Job) error {
+	if err := migrate(&job); err != nil {
+		return err
+	}
 	if err := Validate(job); err != nil {
 		return err
 	}
@@ -297,6 +318,32 @@ func (s *Store) Status(job Job) Status {
 	if job.DryRun {
 		mode = "dry_run"
 	}
+	hostSnapshots := "0/3"
+	count := 0
+	for _, fingerprint := range []string{job.HookFingerprintH1, job.HookFingerprintH2, job.HookFingerprintH3} {
+		if fingerprint != "" {
+			count++
+		}
+	}
+	hostSnapshots = fmt.Sprintf("%d/3", count)
+	verifierStatus := "pending"
+	if job.VerifierProfile == "none" {
+		verifierStatus = "agent-only"
+	} else if job.VerifierPassed {
+		verifierStatus = "passed"
+	} else if job.State == StateVerificationFailed {
+		verifierStatus = "failed"
+	}
+	scheduledFor := ""
+	if job.ScheduledFor != nil {
+		scheduledFor = job.ScheduledFor.UTC().Format(time.RFC3339)
+	}
+	powerBackend := ""
+	cancelScope := ""
+	if job.PowerCapabilities != nil {
+		powerBackend = job.PowerCapabilities.BackendID
+		cancelScope = string(job.PowerCapabilities.CancelScope)
+	}
 	return Status{
 		JobID:             job.JobID,
 		State:             job.State,
@@ -309,8 +356,15 @@ func (s *Store) Status(job Job) Status {
 		SessionBound:      job.SessionID != "",
 		CompletionStatus:  job.CompletionStatus,
 		HookCompatibility: job.HookCompatibility,
-		ExecuteAvailable:  false,
+		ExecuteAvailable:  !job.DryRun,
 		CancelCommand:     "donethen cancel " + job.JobID,
+		HostSnapshots:     hostSnapshots,
+		VerifierStatus:    verifierStatus,
+		ScheduledFor:      scheduledFor,
+		PowerBackend:      powerBackend,
+		CancelScope:       cancelScope,
+		CancelRequested:   job.CancelRequested,
+		CancelReason:      job.CancelReason,
 	}
 }
 
@@ -330,7 +384,7 @@ func (s *Store) RefreshExpiry(jobID string) (Job, error) {
 }
 
 func expire(job *Job, now time.Time) bool {
-	if job.State.IsActive() && job.Expired(now) {
+	if job.State.IsActive() && job.State != StateActionIntent && job.State != StateActionScheduled && job.Expired(now) {
 		job.Generation++
 		job.State = StateExpired
 		job.ReasonCode = "arm_expired"
@@ -343,15 +397,11 @@ func expire(job *Job, now time.Time) bool {
 }
 
 func (s *Store) loadPath(path, expectedJobID string) (Job, error) {
-	file, err := os.Open(path)
+	file, info, err := filetrust.OpenOwnerControlled(path, "plugin job "+expectedJobID)
 	if err != nil {
-		return Job{}, fmt.Errorf("open plugin job %s: %w", expectedJobID, err)
+		return Job{}, err
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return Job{}, fmt.Errorf("inspect plugin job %s: %w", expectedJobID, err)
-	}
 	if info.Size() > maxRecordBytes {
 		return Job{}, fmt.Errorf("plugin job %s exceeds %d bytes", expectedJobID, maxRecordBytes)
 	}
@@ -368,25 +418,39 @@ func (s *Store) loadPath(path, expectedJobID string) (Job, error) {
 	if job.JobID != expectedJobID {
 		return Job{}, fmt.Errorf("plugin job %s has an invalid identity", expectedJobID)
 	}
+	if err := migrate(&job); err != nil {
+		return Job{}, fmt.Errorf("plugin job %s cannot be migrated: %w", expectedJobID, err)
+	}
 	if err := Validate(job); err != nil {
 		return Job{}, fmt.Errorf("plugin job %s is invalid: %w", expectedJobID, err)
 	}
 	return job, nil
 }
 
+func migrate(job *Job) error {
+	switch job.SchemaVersion {
+	case CurrentSchemaVersion:
+		return nil
+	case "1":
+		if !job.DryRun {
+			return errors.New("legacy plugin schema unexpectedly contains an execute job")
+		}
+		job.SchemaVersion = CurrentSchemaVersion
+		return nil
+	default:
+		return fmt.Errorf("unsupported plugin job schema %q", job.SchemaVersion)
+	}
+}
+
 func (s *Store) findBySessionUnlocked(sessionID string) (Job, bool, error) {
-	file, err := os.Open(s.sessionPath(sessionID))
+	file, info, err := filetrust.OpenOwnerControlled(s.sessionPath(sessionID), "plugin session index")
 	if errors.Is(err, os.ErrNotExist) {
 		return Job{}, false, nil
 	}
 	if err != nil {
-		return Job{}, false, fmt.Errorf("open plugin session index: %w", err)
+		return Job{}, false, err
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return Job{}, false, fmt.Errorf("inspect plugin session index: %w", err)
-	}
 	if info.Size() > 4096 {
 		return Job{}, false, errors.New("plugin session index exceeds 4096 bytes")
 	}
@@ -434,7 +498,7 @@ func (s *Store) appendEventUnlocked(job Job, name, eventKey, turnID string, oldS
 	if turnID != "" {
 		event.TurnHash = identity.SHA256([]byte(turnID))
 	}
-	file, err := os.OpenFile(s.logPath(job.JobID), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	file, err := filetrust.OpenAppendOwnerControlled(s.logPath(job.JobID), "plugin event log")
 	if err != nil {
 		return fmt.Errorf("open plugin event log: %w", err)
 	}

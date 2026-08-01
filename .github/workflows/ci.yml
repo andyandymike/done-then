@@ -15,65 +15,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  windows:
-    name: Windows / Go
-    runs-on: windows-latest
-    timeout-minutes: 20
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-
-      - name: Check formatting
-        shell: pwsh
-        run: |
-          $files = @(git ls-files '*.go')
-          $unformatted = @(gofmt -l $files)
-          if ($unformatted.Count -ne 0) {
-            Write-Error "The following files are not formatted:`n$($unformatted -join "`n")"
-            exit 1
-          }
-
-      - name: Test
-        run: go test -count=1 ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Build
-        shell: pwsh
-        run: |
-          $output = Join-Path $env:RUNNER_TEMP 'donethen.exe'
-          go build -trimpath -o $output ./cmd/donethen
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $output --version
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          $buildInfo = @(& go version -m $output)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $expectedRevision = (git rev-parse HEAD).Trim()
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ($buildInfo -cnotcontains "`tbuild`tvcs.revision=$expectedRevision") {
-            Write-Error "Built binary does not contain the checked-out revision $expectedRevision."
-            exit 1
-          }
-          if ($buildInfo -cnotcontains "`tbuild`tvcs.modified=false") {
-            Write-Error 'Built binary is missing clean VCS metadata.'
-            exit 1
-          }
-
-  linux:
-    name: Linux / Go
+  hygiene:
+    name: Source hygiene
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - name: Check out repository
@@ -90,17 +35,121 @@ jobs:
       - name: Check formatting
         shell: bash
         run: |
-          unformatted="$(gofmt -l .)"
+          mapfile -t files < <(git ls-files '*.go')
+          unformatted="$(gofmt -l "${files[@]}")"
           if [[ -n "$unformatted" ]]; then
             printf 'The following files are not formatted:\n%s\n' "$unformatted" >&2
             exit 1
           fi
 
-      - name: Test portable behavior
+      - name: Check patch whitespace
+        run: git diff --check
+
+  platform:
+    name: ${{ matrix.name }} / test, vet, build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            runner: windows-latest
+          - name: Linux
+            runner: ubuntu-latest
+          - name: macOS
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Test with fake action boundaries
         run: go test -count=1 ./...
 
       - name: Vet
         run: go vet ./...
 
-      - name: Build portable fallback
-        run: go build ./cmd/donethen
+      - name: Build all commands
+        run: go build -trimpath ./...
+
+      - name: Parse PowerShell development scripts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem -LiteralPath scripts -Filter '*.ps1' -File | ForEach-Object {
+            [void][scriptblock]::Create((Get-Content -LiteralPath $_.FullName -Raw))
+          }
+
+      - name: Parse Linux installation script
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash -n scripts/install-linux.sh
+
+  race:
+    name: Linux / race-sensitive packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Exercise concurrent state and authority paths
+        run: go test -race -count=1 ./internal/pluginstate ./internal/hostauthority ./internal/pluginpower
+
+  cross-build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Cross-build all commands
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath ./...

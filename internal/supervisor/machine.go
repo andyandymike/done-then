@@ -17,6 +17,7 @@ var allowedTransitions = map[State]map[State]struct{}{
 	StateEvaluating: {
 		StateVerifying:            {},
 		StateActionIntentRecorded: {},
+		StateActionFailed:         {},
 		StateDryRunComplete:       {},
 		StateNotDone:              {},
 		StateInvalidCompletion:    {},
@@ -25,18 +26,26 @@ var allowedTransitions = map[State]map[State]struct{}{
 	},
 	StateVerifying: {
 		StateActionIntentRecorded: {},
+		StateActionFailed:         {},
 		StateDryRunComplete:       {},
 		StateVerificationFailed:   {},
 		StateCancelled:            {},
 		StateOrphaned:             {},
 	},
 	StateActionIntentRecorded: {
-		StateActionScheduled: {},
-		StateActionFailed:    {},
-		StateCancelled:       {},
+		StateActionScheduled:           {},
+		StateActionFailed:              {},
+		StateCancelled:                 {},
+		StateActionExecutionUnverified: {},
+		StateActionExecutedConfirmed:   {},
 	},
 	StateActionScheduled: {
-		StateCancelled: {},
+		StateCancelled:                 {},
+		StateActionExecutionUnverified: {},
+		StateActionExecutedConfirmed:   {},
+	},
+	StateActionExecutionUnverified: {
+		StateActionExecutedConfirmed: {},
 	},
 }
 

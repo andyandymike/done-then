@@ -46,7 +46,7 @@ func cancelCommand(ctx context.Context, args []string, streams IO, deps dependen
 		if pluginErr != nil {
 			return runtimeError(streams.Stderr, supervisor.ExitStateError, "load job", pluginErr)
 		}
-		return cancelPluginJob(pluginJob, streams, pluginStore)
+		return cancelPluginJob(ctx, pluginJob, streams, deps, pluginStore)
 	}
 
 	jobs, err := jobStore.List()
@@ -67,7 +67,7 @@ func cancelCommand(ctx context.Context, args []string, streams IO, deps dependen
 		}
 	}
 	for _, job := range pluginJobs {
-		if job.State.IsActive() {
+		if job.State.IsActive() || pluginstate.HasUnresolvedPowerAction(job) {
 			pluginCandidates = append(pluginCandidates, job)
 			ids = append(ids, job.JobID)
 		}
@@ -79,7 +79,7 @@ func cancelCommand(ctx context.Context, args []string, streams IO, deps dependen
 		if len(classicCandidates) == 1 {
 			return cancelSupervisorJob(ctx, classicCandidates[0], streams, deps, jobStore)
 		}
-		return cancelPluginJob(pluginCandidates[0], streams, pluginStore)
+		return cancelPluginJob(ctx, pluginCandidates[0], streams, deps, pluginStore)
 	default:
 		return runtimeError(streams.Stderr, supervisor.ExitUsage, "select job", fmt.Errorf("multiple active jobs; specify one of: %s", strings.Join(ids, ", ")))
 	}
@@ -102,17 +102,24 @@ func cancelSupervisorJob(ctx context.Context, job supervisor.Job, streams IO, de
 		return runtimeError(streams.Stderr, supervisor.ExitStateError, "reload job after cancellation request", err)
 	}
 	job = reloaded
+	intentAtRequest := job.State == supervisor.StateActionIntentRecorded
 
 	if !job.State.IsUnresolvedPowerState() {
 		fmt.Fprintf(streams.Stdout, "[DoneThen] Job %s disarmed. Its Codex process is not terminated.\n", job.JobID)
 		return 0
 	}
 
-	abortErr := deps.newActionBackend().AbortShutdown(ctx)
-	if abortErr != nil && !errors.Is(abortErr, actions.ErrNoShutdownInProgress) {
-		fmt.Fprintf(streams.Stderr, "[DoneThen] Cancellation recorded, but Windows shutdown abort failed: %v.\n", abortErr)
+	receipt := cancellationReceipt(job)
+	cancelResult, cancelErr := deps.newActionBackend().Cancel(ctx, receipt)
+	job.CancelResult = &cancelResult
+	if cancelErr != nil && !errors.Is(cancelErr, actions.ErrNoShutdownInProgress) {
+		fmt.Fprintf(streams.Stderr, "[DoneThen] Cancellation recorded, but the power backend could not cancel the countdown: %v.\n", cancelErr)
 		fmt.Fprintf(streams.Stderr, "[DoneThen] Job %s remains in state %s; retry cancellation immediately.\n", job.JobID, job.State)
 		return supervisor.ExitActionFailed
+	}
+	if intentAtRequest {
+		fmt.Fprintf(streams.Stdout, "[DoneThen] Job %s has a persisted cancellation request at an unresolved scheduler boundary; retry status/cancel until the coordinator settles it.\n", job.JobID)
+		return 0
 	}
 	old := job.State
 	if err := supervisor.Transition(old, supervisor.StateCancelled); err != nil {
@@ -132,30 +139,108 @@ func cancelSupervisorJob(ctx context.Context, job supervisor.Job, streams IO, de
 		NewState:  job.State,
 		Reason:    job.ReasonCode,
 	})
-	if errors.Is(abortErr, actions.ErrNoShutdownInProgress) {
-		fmt.Fprintf(streams.Stdout, "[DoneThen] Job %s cancelled; Windows reported no shutdown currently in progress.\n", job.JobID)
+	if errors.Is(cancelErr, actions.ErrNoShutdownInProgress) || cancelResult.NoActionInProgress {
+		fmt.Fprintf(streams.Stdout, "[DoneThen] Job %s cancelled; the backend reported no shutdown currently in progress.\n", job.JobID)
 	} else {
-		fmt.Fprintf(streams.Stdout, "[DoneThen] Job %s cancelled and the Windows shutdown countdown was aborted.\n", job.JobID)
+		fmt.Fprintf(streams.Stdout, "[DoneThen] Job %s cancelled and the shutdown countdown was aborted (scope=%s).\n", job.JobID, cancelResult.Scope)
 	}
 	return 0
 }
 
-func cancelPluginJob(job pluginstate.Job, streams IO, pluginStore *pluginstate.Store) int {
+func cancellationReceipt(job supervisor.Job) actions.Receipt {
+	if job.PowerReceipt != nil {
+		return *job.PowerReceipt
+	}
+	requestedAt := job.CreatedAt.UTC()
+	if job.ActionIntentAt != nil {
+		requestedAt = job.ActionIntentAt.UTC()
+	}
+	deadline := requestedAt.Add(time.Duration(job.DelaySeconds) * time.Second)
+	if job.ScheduledFor != nil {
+		deadline = job.ScheduledFor.UTC()
+	}
+	platformName := "windows"
+	backendID := "windows-shutdown-exe"
+	cancelScope := actions.CancelScopeSystemGlobal
+	if job.PowerCapabilities != nil {
+		platformName = job.PowerCapabilities.Platform
+		backendID = job.PowerCapabilities.BackendID
+		cancelScope = job.PowerCapabilities.CancelScope
+	}
+	externalToken := ""
+	if platformName == "linux-systemd" && backendID == "linux-systemd-helper" {
+		externalToken = actions.SystemdUnitToken(job.JobID)
+	}
+	return actions.SealReceipt(actions.Receipt{
+		SchemaVersion:  actions.ReceiptSchemaVersion,
+		Platform:       platformName,
+		BackendID:      backendID,
+		BackendVersion: "intent-recovery",
+		JobID:          job.JobID,
+		Action:         job.Action,
+		RequestedAt:    requestedAt,
+		ScheduledAt:    requestedAt,
+		Deadline:       deadline,
+		CancelScope:    cancelScope,
+		ExternalToken:  externalToken,
+		ResultSummary:  "reconstructed from unresolved action intent",
+	})
+}
+
+func cancelPluginJob(ctx context.Context, job pluginstate.Job, streams IO, deps dependencies, pluginStore *pluginstate.Store) int {
 	if job.State == pluginstate.StateCancelled {
 		fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s is already cancelled.\n", job.JobID)
 		return 0
 	}
-	if job.State.IsTerminal() {
+	intentAtRequest := job.State == pluginstate.StateActionIntent
+	unresolvedPower := pluginstate.HasUnresolvedPowerAction(job)
+	if job.State.IsTerminal() && !unresolvedPower {
 		fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s is already in terminal state %s; no action is active.\n", job.JobID, job.State)
 		return 0
 	}
+	var cancelResult *actions.CancelResult
+	if unresolvedPower {
+		job, _, err := pluginStore.UpdateJob(job.JobID, "cli.cancel.requested", "", func(current *pluginstate.Job, _ time.Time) error {
+			if !pluginstate.HasUnresolvedPowerAction(*current) {
+				return nil
+			}
+			current.Generation++
+			current.CancelRequested = true
+			current.CancelReason = "cli_cancelled_by_user"
+			current.ReasonCode = "power_cancel_requested"
+			return nil
+		})
+		if err != nil {
+			return runtimeError(streams.Stderr, supervisor.ExitStateError, "persist plugin cancellation request", err)
+		}
+		receipt, receiptErr := pluginstate.RecoveryReceipt(job)
+		if receiptErr != nil {
+			return runtimeError(streams.Stderr, supervisor.ExitStateError, "recover plugin cancellation receipt", receiptErr)
+		}
+		result, cancelErr := deps.newActionBackend().Cancel(ctx, receipt)
+		cancelResult = &result
+		if cancelErr != nil && !errors.Is(cancelErr, actions.ErrNoShutdownInProgress) {
+			fmt.Fprintf(streams.Stderr, "[DoneThen] Plugin cancellation was not confirmed by the power backend: %v. Retry immediately.\n", cancelErr)
+			return supervisor.ExitActionFailed
+		}
+	}
 	updated, _, err := pluginStore.UpdateJob(job.JobID, "cli.cancel", "", func(job *pluginstate.Job, _ time.Time) error {
-		if job.State.IsTerminal() {
+		if job.State.IsTerminal() && !pluginstate.HasUnresolvedPowerAction(*job) {
+			return nil
+		}
+		if intentAtRequest && pluginstate.HasUnresolvedPowerAction(*job) {
+			job.CancelRequested = true
+			job.CancelReason = "cli_cancelled_by_user"
+			job.ReasonCode = "cancel_requested_pending_scheduler_settlement"
+			job.CancelResult = cancelResult
 			return nil
 		}
 		job.Generation++
 		job.State = pluginstate.StateCancelled
 		job.ReasonCode = "cancelled_by_user"
+		job.CancelRequested = true
+		job.CancelReason = "cli_cancelled_by_user"
+		job.CancelResult = cancelResult
 		job.CompletionStatus = ""
 		job.CompletionEvidenceHash = ""
 		job.ReadyTurnID = ""
@@ -166,10 +251,20 @@ func cancelPluginJob(job pluginstate.Job, streams IO, pluginStore *pluginstate.S
 	if err != nil {
 		return runtimeError(streams.Stderr, supervisor.ExitStateError, "cancel plugin job", err)
 	}
+	if intentAtRequest && pluginstate.HasUnresolvedPowerAction(updated) {
+		fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s has a persisted cancellation request at an unresolved scheduler boundary; retry status/cancel until the supervisor settles it.\n", updated.JobID)
+		return 0
+	}
 	if updated.State != pluginstate.StateCancelled {
 		fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s became terminal in state %s; no action is active.\n", updated.JobID, updated.State)
 		return 0
 	}
-	fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s cancelled. Observe-only plugin mode had not scheduled a power action.\n", updated.JobID)
+	if cancelResult != nil {
+		fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s cancelled; the countdown was aborted (scope=%s).\n", updated.JobID, cancelResult.Scope)
+	} else if updated.DryRun {
+		fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s cancelled. Observe-only plugin mode had not scheduled a power action.\n", updated.JobID)
+	} else {
+		fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s cancelled before a power action was scheduled.\n", updated.JobID)
+	}
 	return 0
 }

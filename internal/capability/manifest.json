@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "updated": "2026-07-31",
+  "plugin_execute_default": "disabled",
+  "platforms": {
+    "windows-amd64": {
+      "level": "C2",
+      "statement": "preview; real backend code is present but real cancel and poweroff acceptance are pending"
+    },
+    "windows-arm64": {
+      "level": "C1",
+      "statement": "portable build only; native acceptance is pending"
+    },
+    "linux-amd64": {
+      "level": "C1",
+      "statement": "systemd helper code is present; installation and real-host acceptance are pending"
+    },
+    "linux-arm64": {
+      "level": "C1",
+      "statement": "systemd helper code is present; installation and real-host acceptance are pending"
+    },
+    "darwin-amd64": {
+      "level": "C1",
+      "statement": "portable build only; signed and notarized helper is not delivered"
+    },
+    "darwin-arm64": {
+      "level": "C1",
+      "statement": "portable build only; signed and notarized helper is not delivered"
+    }
+  }
+}

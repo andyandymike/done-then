@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/andyandymike/done-then/internal/actions"
+	"github.com/andyandymike/done-then/internal/filetrust"
 	"github.com/andyandymike/done-then/internal/supervisor"
 )
 
@@ -25,14 +27,7 @@ type Store struct {
 }
 
 func DefaultRoot() (string, error) {
-	if root := os.Getenv("LOCALAPPDATA"); root != "" {
-		return filepath.Join(root, "DoneThen"), nil
-	}
-	cache, err := os.UserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("locate local application data: %w", err)
-	}
-	return filepath.Join(cache, "DoneThen"), nil
+	return platformDefaultRoot()
 }
 
 func New(root string) (*Store, error) {
@@ -44,9 +39,18 @@ func New(root string) (*Store, error) {
 		return nil, fmt.Errorf("resolve store root: %w", err)
 	}
 	store := &Store{root: absolute, now: time.Now}
-	for _, directory := range []string{store.jobsDir(), store.logsDir(), store.tmpDir()} {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			return nil, fmt.Errorf("create DoneThen data directory: %w", err)
+	directories := []struct {
+		path  string
+		label string
+	}{
+		{store.root, "DoneThen data root"},
+		{store.jobsDir(), "DoneThen job directory"},
+		{store.logsDir(), "DoneThen log directory"},
+		{store.tmpDir(), "DoneThen temporary directory"},
+	}
+	for _, directory := range directories {
+		if err := filetrust.EnsureOwnerControlledDirectory(directory.path, directory.label); err != nil {
+			return nil, err
 		}
 	}
 	return store, nil
@@ -57,6 +61,9 @@ func (s *Store) Root() string {
 }
 
 func (s *Store) Create(job supervisor.Job) error {
+	if err := migrateJob(&job); err != nil {
+		return err
+	}
 	if err := validateJobID(job.JobID); err != nil {
 		return err
 	}
@@ -73,6 +80,9 @@ func (s *Store) Create(job supervisor.Job) error {
 }
 
 func (s *Store) Save(job supervisor.Job) error {
+	if err := migrateJob(&job); err != nil {
+		return err
+	}
 	if err := validateJobID(job.JobID); err != nil {
 		return err
 	}
@@ -89,14 +99,12 @@ func (s *Store) Load(jobID string) (supervisor.Job, error) {
 	if err := validateJobID(jobID); err != nil {
 		return supervisor.Job{}, err
 	}
-	file, err := os.Open(s.jobPath(jobID))
+	file, info, err := filetrust.OpenOwnerControlled(s.jobPath(jobID), "job "+jobID)
 	if err != nil {
-		return supervisor.Job{}, fmt.Errorf("open job %s: %w", jobID, err)
+		return supervisor.Job{}, err
 	}
 	defer file.Close()
-	if info, err := file.Stat(); err != nil {
-		return supervisor.Job{}, fmt.Errorf("inspect job %s: %w", jobID, err)
-	} else if info.Size() > maxRecordBytes {
+	if info.Size() > maxRecordBytes {
 		return supervisor.Job{}, fmt.Errorf("job %s exceeds %d bytes", jobID, maxRecordBytes)
 	}
 	decoder := json.NewDecoder(io.LimitReader(file, maxRecordBytes+1))
@@ -109,8 +117,11 @@ func (s *Store) Load(jobID string) (supervisor.Job, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return supervisor.Job{}, fmt.Errorf("job %s contains trailing data", jobID)
 	}
-	if job.SchemaVersion != "1" || job.JobID != jobID {
+	if job.JobID != jobID {
 		return supervisor.Job{}, fmt.Errorf("job %s has an invalid identity or schema", jobID)
+	}
+	if err := migrateJob(&job); err != nil {
+		return supervisor.Job{}, fmt.Errorf("job %s cannot be migrated: %w", jobID, err)
 	}
 	if err := validateJob(job); err != nil {
 		return supervisor.Job{}, fmt.Errorf("job %s is invalid: %w", jobID, err)
@@ -174,7 +185,7 @@ func (s *Store) AppendEvent(event supervisor.Event) error {
 	}
 	s.logMu.Lock()
 	defer s.logMu.Unlock()
-	file, err := os.OpenFile(s.logPath(event.JobID), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	file, err := filetrust.OpenAppendOwnerControlled(s.logPath(event.JobID), "job event log")
 	if err != nil {
 		return fmt.Errorf("open job event log: %w", err)
 	}
@@ -196,8 +207,8 @@ func (s *Store) ArtifactDir(jobID string) (string, error) {
 		return "", err
 	}
 	path := filepath.Join(s.tmpDir(), jobID)
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		return "", fmt.Errorf("create job artifact directory: %w", err)
+	if err := filetrust.EnsureOwnerControlledDirectory(path, "job artifact directory"); err != nil {
+		return "", err
 	}
 	return path, nil
 }
@@ -292,7 +303,7 @@ func validateJobID(jobID string) error {
 }
 
 func validateJob(job supervisor.Job) error {
-	if job.SchemaVersion != "1" {
+	if job.SchemaVersion != "2" {
 		return fmt.Errorf("unsupported job schema %q", job.SchemaVersion)
 	}
 	switch job.State {
@@ -308,6 +319,8 @@ func validateJob(job supervisor.Job) error {
 		supervisor.StateInvalidCompletion,
 		supervisor.StateVerificationFailed,
 		supervisor.StateActionFailed,
+		supervisor.StateActionExecutionUnverified,
+		supervisor.StateActionExecutedConfirmed,
 		supervisor.StateCancelled,
 		supervisor.StateOrphaned:
 	default:
@@ -325,11 +338,82 @@ func validateJob(job supervisor.Job) error {
 	if job.State.IsUnresolvedPowerState() && job.ActionIntentAt == nil {
 		return errors.New("power-action job is missing action_intent_at")
 	}
+	if job.State.IsUnresolvedPowerState() && job.PowerCapabilities == nil {
+		return errors.New("power-action job is missing platform capabilities")
+	}
 	if job.State == supervisor.StateActionScheduled && job.ScheduledFor == nil {
 		return errors.New("scheduled job is missing scheduled_for")
+	}
+	if job.PowerReceipt != nil {
+		if err := actions.ValidateReceipt(*job.PowerReceipt); err != nil {
+			return fmt.Errorf("job has an invalid power receipt: %w", err)
+		}
+		if job.PowerReceipt.JobID != job.JobID || job.PowerReceipt.Action != job.Action {
+			return errors.New("job receipt does not match the job")
+		}
+	}
+	if job.State == supervisor.StateActionScheduled {
+		if job.PowerReceipt == nil {
+			return errors.New("scheduled job is missing power_receipt")
+		}
+		if !job.ScheduledFor.Equal(job.PowerReceipt.Deadline) {
+			return errors.New("scheduled job deadline does not match its receipt")
+		}
+	}
+	if (job.State == supervisor.StateActionExecutionUnverified || job.State == supervisor.StateActionExecutedConfirmed) &&
+		(job.PowerReceipt == nil || job.ReconcileResult == nil) {
+		return errors.New("reconciled job is missing receipt or reconcile result")
 	}
 	if job.CreatedAt.IsZero() || job.UpdatedAt.IsZero() {
 		return errors.New("job timestamps are required")
 	}
+	return nil
+}
+
+func migrateJob(job *supervisor.Job) error {
+	switch job.SchemaVersion {
+	case "2":
+		return nil
+	case "1":
+		job.SchemaVersion = "2"
+	default:
+		return fmt.Errorf("unsupported job schema %q", job.SchemaVersion)
+	}
+	if job.DryRun || (job.State != supervisor.StateActionIntentRecorded && job.State != supervisor.StateActionScheduled) {
+		return nil
+	}
+	job.PowerCapabilities = &actions.Capabilities{
+		Platform:           "windows",
+		BackendID:          "windows-shutdown-exe",
+		ExecuteSupported:   true,
+		CancelScope:        actions.CancelScopeSystemGlobal,
+		MinimumDelay:       30 * time.Second,
+		MaximumDelay:       time.Hour,
+		ReconcileSupported: true,
+		Reason:             "migrated from legacy schema 1",
+	}
+	if job.State != supervisor.StateActionScheduled || job.ScheduledFor == nil {
+		return nil
+	}
+	requestedAt := job.CreatedAt.UTC()
+	if job.ActionIntentAt != nil {
+		requestedAt = job.ActionIntentAt.UTC()
+	}
+	scheduledAt := job.UpdatedAt.UTC()
+	receipt := actions.SealReceipt(actions.Receipt{
+		SchemaVersion:  actions.ReceiptSchemaVersion,
+		Platform:       "windows",
+		BackendID:      "windows-shutdown-exe",
+		BackendVersion: "legacy-schema-1",
+		JobID:          job.JobID,
+		Action:         job.Action,
+		RequestedAt:    requestedAt,
+		ScheduledAt:    scheduledAt,
+		Deadline:       job.ScheduledFor.UTC(),
+		CancelScope:    actions.CancelScopeSystemGlobal,
+		ResultCode:     0,
+		ResultSummary:  "migrated legacy Windows shutdown receipt",
+	})
+	job.PowerReceipt = &receipt
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/andyandymike/done-then/internal/actions"
 	"github.com/andyandymike/done-then/internal/identity"
 )
 
@@ -92,5 +93,53 @@ func TestConcurrentProcessesUseSerializedAtomicUpdates(t *testing.T) {
 	}
 	if len(updated.ProcessedEventKeys) != committed {
 		t.Fatalf("event keys = %d, want %d", len(updated.ProcessedEventKeys), committed)
+	}
+}
+
+func TestUnresolvedIntentDoesNotExpireAndKeepsRecoveryReceipt(t *testing.T) {
+	root := t.TempDir()
+	state, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	capabilities := actions.Capabilities{
+		Platform: "linux-systemd", BackendID: "linux-systemd-helper", ExecuteSupported: true,
+		CancelScope: actions.CancelScopeJob, MinimumDelay: 30 * time.Second, MaximumDelay: time.Hour,
+	}
+	receipt, err := actions.BuildIntentReceipt(jobIdentity.JobID, "shutdown", now, 2*time.Minute, capabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := receipt.Deadline
+	job := Job{
+		SchemaVersion: CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
+		State: StateActionIntent, ReasonCode: "action_intent_recorded", Action: "shutdown", DelaySeconds: 120,
+		ExpiresAt: now.Add(time.Minute), CreatedAt: now, UpdatedAt: now, SessionID: "thread-1", ArmTurnID: "turn-1",
+		Generation: 1, VerifierProfile: "none", AllowAgentOnlySuccess: true, HookCompatibility: "compatible",
+		ArmObserved: true, WorkspaceCWD: root, PowerPolicyFingerprint: "sha256:policy", ActionIntentAt: &now,
+		ScheduledFor: &deadline, PowerCapabilities: &capabilities, PowerReceipt: &receipt,
+	}
+	if err := state.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	state.now = func() time.Time { return now.Add(2 * time.Hour) }
+	refreshed, err := state.RefreshExpiry(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.State != StateActionIntent || !HasUnresolvedPowerAction(refreshed) {
+		t.Fatalf("expired unresolved intent = %#v", refreshed)
+	}
+	recovered, err := RecoveryReceipt(refreshed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Checksum != receipt.Checksum || recovered.ExternalToken != actions.SystemdUnitToken(job.JobID) {
+		t.Fatalf("recovery receipt = %#v", recovered)
 	}
 }

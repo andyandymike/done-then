@@ -10,12 +10,13 @@ command directly and never treat a stopped turn as proof that the task is done.
 
 ## Workflow
 
-1. Explain that this plugin build is observe-only and cannot actually shut down
-   the machine yet.
-2. Call `done_then.arm` once with `mode: dry_run`, a bounded expiry, and the
-   user-requested delay. Preserve the returned `job_id`. Set
-   `allow_agent_only_success` only when the user explicitly accepts structured
-   agent self-report without an independent verifier.
+1. Default to `dry_run`. Use `execute` only when the user explicitly requested
+   a real shutdown and the tool reports `execute_available: true`. If execute
+   is unavailable, keep the machine on and report the missing local setup.
+2. Call `done_then.arm` once with a bounded expiry and the user-requested delay.
+   Preserve the returned `job_id`, show `donethen cancel <job-id>`, and name the
+   pre-registered verifier profile. Set `allow_agent_only_success` only when the
+   user explicitly accepts that weaker boundary and local policy permits it.
 3. Continue the user's task in the same Codex task.
 4. Call `done_then.pause` before yielding for user input, approval, or external
    state. Choose only one of the documented reason codes.
@@ -30,6 +31,7 @@ command directly and never treat a stopped turn as proof that the task is done.
 If completion is partial, blocked, failed, unverified, expired, or ambiguous,
 keep the machine on. Do not call `finish` with invented evidence.
 
-In the final response, report the actual DoneThen state and remind the user
-that `execute` remains unavailable until authoritative hook-inventory checks
-are implemented.
+In the final response, report the actual persisted state. Distinguish armed,
+host monitoring, verification, action intent, scheduled countdown, cancelled,
+and execution-unverified states; never describe `ACTION_SCHEDULED` as proof the
+machine powered off.

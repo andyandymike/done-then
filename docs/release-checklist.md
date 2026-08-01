@@ -6,9 +6,10 @@ description: Source, CI, cancellation, artifact, and post-release gates for Done
 
 # Release checklist
 
-This checklist applies to the first DoneThen Windows alpha and later releases.
-It does not authorize a release by itself. The maintainer performing the
-release owns every manual confirmation below.
+This checklist applies to portable prereleases and later power-capable releases.
+It does not authorize a release or raise a capability level by itself. The
+maintainer performing the release owns every manual confirmation below, and
+each OS/architecture is evaluated independently against the capability manifest.
 
 ## 1. Source and policy review
 
@@ -34,14 +35,24 @@ go build ./...
 git diff --check
 ```
 
+CI additionally runs the full suite on Windows, Ubuntu, and macOS, race tests
+for concurrent state/authority paths, PowerShell parse checks, and CGO-free
+cross-builds for all six published OS/architecture pairs.
+
 - [ ] Every command exits successfully.
 - [ ] Tests at the action boundary use only the fake backend or injected fake
       process runner.
+- [ ] Countdown tests cover user continuation, authority/policy/verifier drift,
+      host loss, excessive wake lateness, and cancel-during-schedule races.
+- [ ] Linux helper reconciliation proves inactive stale state is released and
+      never invokes or retries `poweroff`.
 - [ ] A clean checkout passes `.github/workflows/ci.yml`.
 
-## 3. Manual countdown-and-cancel acceptance
+## 3. Manual Windows power acceptance
 
-This section intentionally reaches the real Windows shutdown backend. Run it
+This section intentionally reaches the real Windows shutdown backend. It has
+two separate cases: countdown/cancel and completed power-off/reconciliation.
+Run either case
 only with explicit authorization on a non-critical Windows test machine. Close
 important work first and ensure no unrelated shutdown or restart is pending.
 
@@ -80,6 +91,26 @@ Copy the emitted job ID and cancel immediately:
 - [ ] The machine remains on after the original five-minute window.
 - [ ] The acceptance record contains no sensitive data.
 
+Passing the cancel case raises no claim above C3. It does not prove that the
+machine can power off.
+
+For the power-off case, use the same reviewed artifact on a non-critical test
+machine or recoverable VM, but allow the five-minute countdown to finish. After
+starting the machine again, run:
+
+```powershell
+.\bin\donethen.exe reconcile <job-id>
+.\bin\donethen.exe status <job-id>
+```
+
+- [ ] The machine visibly powered off rather than merely ending the agent turn.
+- [ ] The boot identity changed.
+- [ ] `reconcile` did not schedule or retry any action.
+- [ ] Platform evidence justifies `ACTION_EXECUTED_CONFIRMED`; otherwise the
+      result remains `ACTION_EXECUTION_UNVERIFIED` and the capability does not
+      advance.
+- [ ] A separate current-task Plugin execute run is completed before claiming C5.
+
 If any observation is ambiguous, run the following emergency cancellation and
 do not publish the release:
 
@@ -93,20 +124,28 @@ do not publish the release:
       `v0.1.0-alpha`.
 - [ ] The tag points to the reviewed release commit.
 - [ ] Pushing the tag completes `.github/workflows/release.yml`.
-- [ ] The zip contains exactly `donethen.exe`, `README.md`, `LICENSE`, and
-      `CHANGELOG.md`.
-- [ ] `donethen.exe --version` matches the tag without the leading `v`.
-- [ ] `go version -m donethen.exe` reports the tagged `vcs.revision`,
+- [ ] The release has archives for Windows, Linux, and macOS on `amd64` and
+      `arm64`; the archive set matches the release workflow allowlist exactly.
+- [ ] Every archive contains `README.md`, `LICENSE`, `CHANGELOG.md`,
+      `CAPABILITIES.json`, and `BUILDINFO.txt`; Linux alone also contains the
+      helper, plan-first installer, service, and tmpfiles definition.
+- [ ] Windows `amd64` `donethen.exe --version` matches the tag without `v`.
+- [ ] Every `BUILDINFO.txt` reports the tagged `vcs.revision`,
       `vcs.modified=false`, and retained build metadata.
-- [ ] The published zip hash matches `SHA256SUMS.txt`.
-- [ ] `gh attestation verify <zip> --repo andyandymike/done-then` succeeds.
+- [ ] Every published archive hash matches the combined `SHA256SUMS.txt`.
+- [ ] Every archive has exactly one matching `.spdx.json` asset whose SPDX 2.3
+      file checksum matches the downloaded archive.
+- [ ] `gh attestation verify <archive> --repo andyandymike/done-then` succeeds
+      for every archive.
 - [ ] A prerelease tag is marked as a GitHub prerelease and not Latest.
-- [ ] Release notes say that the Windows binary is unsigned.
+- [ ] Release notes state that Windows is unsigned, macOS is not signed or
+      notarized, and portable packages do not imply accepted power support.
 
 ## 5. Post-release
 
-- [ ] Install the published zip into a path containing spaces and run
-      `donethen.exe --version` and `donethen.exe help`.
+- [ ] Exercise each native archive on its matching architecture; include a
+      Windows path containing spaces and a Unicode path.
+- [ ] Run the Linux installer without `--apply` and confirm it writes nothing.
 - [ ] Run a dry-run using the published binary; do not repeat the real action
       merely to smoke-test the download.
 - [ ] Confirm the GitHub Security tab links to `SECURITY.md`.

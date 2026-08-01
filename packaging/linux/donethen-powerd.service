@@ -1,0 +1,31 @@
+[Unit]
+Description=DoneThen narrow system power helper
+Documentation=https://github.com/andyandymike/done-then
+After=systemd-tmpfiles-setup.service
+ConditionPathExists=/usr/local/libexec/donethen/donethen-powerd
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/donethen/donethen-powerd
+User=root
+Group=root
+RuntimeDirectory=donethen
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=restart
+StateDirectory=donethen
+StateDirectoryMode=0700
+UMask=0077
+ExecStartPre=/usr/bin/touch /run/donethen/power.lock
+ExecStartPre=/usr/bin/chown root:donethen /run/donethen/power.lock
+ExecStartPre=/usr/bin/chmod 0660 /run/donethen/power.lock
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run/donethen /var/lib/donethen
+RestrictAddressFamilies=AF_UNIX
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

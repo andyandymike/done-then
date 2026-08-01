@@ -101,6 +101,9 @@ func (o *Observer) postToolUse(input hookInput) error {
 	}
 	_, _, err = o.store.UpdateJob(jobID, "hook.post_tool."+tool, eventKey, func(job *pluginstate.Job, now time.Time) error {
 		if job.SessionID != input.SessionID {
+			if requestPowerCancellation(job, "tool_session_mismatch_after_power_intent") {
+				return nil
+			}
 			if job.State.IsActive() {
 				job.Generation++
 				job.State = pluginstate.StateHookUnavailable
@@ -142,6 +145,9 @@ func (o *Observer) userPromptSubmit(input hookInput) error {
 		if job.State.IsTerminal() {
 			return nil
 		}
+		if requestPowerCancellation(job, "new_prompt_requested_power_cancel") {
+			return nil
+		}
 		if job.Expired(now) {
 			job.Generation++
 			job.State = pluginstate.StateExpired
@@ -168,6 +174,10 @@ func (o *Observer) stop(input hookInput) error {
 		if job.State.IsTerminal() {
 			return nil
 		}
+		if pluginstate.HasUnresolvedPowerAction(*job) && input.TurnID != job.StopTurnID {
+			requestPowerCancellation(job, "later_stop_requested_power_cancel")
+			return nil
+		}
 		if job.Expired(now) {
 			job.Generation++
 			job.State = pluginstate.StateExpired
@@ -188,7 +198,11 @@ func (o *Observer) stop(input hookInput) error {
 		}
 		job.State = pluginstate.StateStopObserved
 		job.StopTurnID = input.TurnID
-		job.ReasonCode = "matching_stop_observed_no_action"
+		if job.DryRun {
+			job.ReasonCode = "matching_stop_observed_no_action"
+		} else {
+			job.ReasonCode = "matching_stop_observed_awaiting_final_gate"
+		}
 		return nil
 	})
 	return err
@@ -201,6 +215,9 @@ func (o *Observer) sessionEnd(input hookInput) error {
 	eventKey := hookEventKey(input, "")
 	_, _, _, err := o.store.UpdateSession(input.SessionID, "", "hook.session_end", eventKey, func(job *pluginstate.Job, _ time.Time) error {
 		if job.State.IsTerminal() {
+			return nil
+		}
+		if requestPowerCancellation(job, "session_end_requested_power_cancel") {
 			return nil
 		}
 		job.Generation++
@@ -330,4 +347,25 @@ func clearCompletion(job *pluginstate.Job) {
 	job.ReadyTurnID = ""
 	job.StopTurnID = ""
 	job.FinishObserved = false
+	job.VerifierPassed = false
+	job.VerifierExitCode = nil
+	job.HookFingerprintH1 = ""
+	job.HookFingerprintH2 = ""
+	job.HookFingerprintH3 = ""
+	job.HookCompatibility = "not_evaluated"
+	job.HostSnapshotReason = ""
+	job.HostInstanceID = ""
+	job.CancelRequested = false
+	job.CancelReason = ""
+}
+
+func requestPowerCancellation(job *pluginstate.Job, reason string) bool {
+	if !pluginstate.HasUnresolvedPowerAction(*job) {
+		return false
+	}
+	job.Generation++
+	job.CancelRequested = true
+	job.CancelReason = reason
+	job.ReasonCode = reason
+	return true
 }

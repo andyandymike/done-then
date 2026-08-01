@@ -5,6 +5,7 @@ package processgroup
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"syscall"
 	"unsafe"
 )
@@ -54,6 +55,13 @@ type extendedLimitInformation struct {
 
 type windowsGroup struct {
 	handle syscall.Handle
+}
+
+func preparePlatform(command *exec.Cmd) error {
+	if command == nil {
+		return fmt.Errorf("command is nil")
+	}
+	return nil
 }
 
 func attachPlatform(process *os.Process) (Group, error) {

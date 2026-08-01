@@ -231,8 +231,8 @@ func tools() []tool {
 	return []tool{
 		{
 			Name:        "arm",
-			Title:       "Arm DoneThen dry-run",
-			Description: "Create a time-limited, one-shot shutdown intention. This build accepts dry_run only and cannot invoke a power action.",
+			Title:       "Arm DoneThen",
+			Description: "Create a time-limited one-shot shutdown grant. The public server currently exposes dry-run only; execute stays unavailable until an authoritative same-host integration is delivered.",
 			InputSchema: map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
@@ -242,9 +242,9 @@ func tools() []tool {
 				"properties": map[string]any{
 					"action":             map[string]any{"type": "string", "const": "shutdown"},
 					"delay_seconds":      map[string]any{"type": "integer", "minimum": 30, "maximum": 3600},
-					"expires_in_seconds": map[string]any{"type": "integer", "minimum": 60, "maximum": 604800},
+					"expires_in_seconds": map[string]any{"type": "integer", "minimum": 60, "maximum": 86400},
 					"mode":               map[string]any{"type": "string", "enum": []string{"dry_run", "execute"}},
-					"verifier_profile":   stringProperty("Pre-registered verifier profile; only none is available in this build"),
+					"verifier_profile":   stringProperty("Pre-registered verifier profile id, or none with an explicitly permitted agent-only boundary"),
 					"allow_agent_only_success": map[string]any{
 						"type":        "boolean",
 						"description": "Explicitly accept structured agent self-report when verifier_profile is none",
@@ -255,7 +255,7 @@ func tools() []tool {
 		{
 			Name:        "finish",
 			Title:       "Report DoneThen completion",
-			Description: "Strictly validate completion evidence and wait for the matching Stop observer. This never schedules an action.",
+			Description: "Validate structured completion and run the fixed registered verifier. The background supervisor still requires matching Hook, turn, task-inventory, and final host evidence before any action.",
 			InputSchema: map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
@@ -283,7 +283,7 @@ func tools() []tool {
 		{
 			Name:        "cancel",
 			Title:       "Cancel DoneThen",
-			Description: "Idempotently disarm a DoneThen plugin job. Plugin mode cannot have scheduled a power action in this build.",
+			Description: "Idempotently disarm a DoneThen job and, when a receipt exists, cancel only through the receipt-bound platform backend.",
 			InputSchema: jobIDSchema(true),
 		},
 		{

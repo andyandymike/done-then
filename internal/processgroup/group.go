@@ -1,9 +1,16 @@
 package processgroup
 
-import "os"
+import (
+	"os"
+	"os/exec"
+)
 
 type Group interface {
 	Close() error
+}
+
+func Prepare(command *exec.Cmd) error {
+	return preparePlatform(command)
 }
 
 func Attach(process *os.Process) (Group, error) {

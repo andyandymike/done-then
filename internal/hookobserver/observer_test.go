@@ -7,7 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/andyandymike/done-then/internal/actions"
+	"github.com/andyandymike/done-then/internal/identity"
 	"github.com/andyandymike/done-then/internal/pluginapi"
 	"github.com/andyandymike/done-then/internal/pluginstate"
 )
@@ -139,6 +142,70 @@ func TestStopWithoutReadyIsObserverOnlyNoOp(t *testing.T) {
 	job, err := state.Load(jobID)
 	if err != nil || job.State != pluginstate.StateArmed {
 		t.Fatalf("unready Stop changed authority: %#v, %v", job, err)
+	}
+}
+
+func TestUserPromptPreservesScheduledReceiptAndRequestsCancellation(t *testing.T) {
+	root := t.TempDir()
+	state, err := pluginstate.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	job := pluginstate.Job{
+		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
+		State: pluginstate.StateArmPendingBind, ReasonCode: "awaiting_hook", Action: "shutdown", DelaySeconds: 120,
+		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, Generation: 1,
+		VerifierProfile: "none", AllowAgentOnlySuccess: true, HookCompatibility: "not_evaluated",
+		WorkspaceCWD: root, PowerPolicyFingerprint: "sha256:policy",
+	}
+	if err := state.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	job, _, err = state.BindSession(job.JobID, "session-power", "turn-1", strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities := actions.Capabilities{
+		Platform: "fake", BackendID: "fake", ExecuteSupported: true, CancelScope: actions.CancelScopeJob,
+		MinimumDelay: 30 * time.Second, MaximumDelay: time.Hour,
+	}
+	receipt := actions.SealReceipt(actions.Receipt{
+		Platform: "fake", BackendID: "fake", BackendVersion: "1", JobID: job.JobID, Action: job.Action,
+		RequestedAt: now, ScheduledAt: now, Deadline: now.Add(2 * time.Minute), ExternalToken: "fixed-token",
+		CancelScope: actions.CancelScopeJob,
+	})
+	deadline := receipt.Deadline
+	job, _, err = state.UpdateJob(job.JobID, "test.power.scheduled", "", func(job *pluginstate.Job, _ time.Time) error {
+		job.State = pluginstate.StateActionScheduled
+		job.ActionIntentAt = &now
+		job.ScheduledFor = &deadline
+		job.PowerCapabilities = &capabilities
+		job.PowerReceipt = &receipt
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer, err := New(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := `{"session_id":"session-power","turn_id":"turn-2","hook_event_name":"UserPromptSubmit","prompt":"continue"}`
+	if err := observer.Handle(strings.NewReader(prompt)); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != pluginstate.StateActionScheduled || !updated.CancelRequested || updated.PowerReceipt == nil ||
+		updated.PowerReceipt.Checksum != receipt.Checksum || updated.Generation <= job.Generation {
+		t.Fatalf("continued scheduled job = %#v", updated)
 	}
 }
 

@@ -56,6 +56,10 @@ func (r Runner) Run(ctx context.Context) (supervisor.AgentResult, error) {
 	taskCtx, cancel := context.WithTimeout(ctx, r.TaskTimeout)
 	defer cancel()
 	command := exec.CommandContext(taskCtx, r.Executable.Path, args...)
+	if err := processgroup.Prepare(command); err != nil {
+		result.Duration = time.Since(started)
+		return result, fmt.Errorf("prepare Codex process tree: %w", err)
+	}
 	command.Stdout = r.Stdout
 	command.Stderr = r.Stderr
 	if r.Invocation.PromptFromStdin {

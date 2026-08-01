@@ -103,7 +103,7 @@ func statusCommand(args []string, streams IO, deps dependencies) int {
 	}
 	if len(pluginJobs) != 0 {
 		writer := tabwriter.NewWriter(streams.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(writer, "PLUGIN JOB ID\tSTATE\tMODE\tHOOKS\tACTION\tEXPIRES\tEXECUTE")
+		fmt.Fprintln(writer, "PLUGIN JOB ID\tSTATE\tMODE\tCANCEL\tHOST\tVERIFIER\tACTION\tEXPIRES\tSCHEDULED")
 		for _, job := range pluginJobs {
 			if job.State.IsActive() && job.Expired(timeNowUTC()) {
 				refreshed, refreshErr := pluginStore.RefreshExpiry(job.JobID)
@@ -113,14 +113,24 @@ func statusCommand(args []string, streams IO, deps dependencies) int {
 				job = refreshed
 			}
 			status := pluginStore.Status(job)
-			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			scheduled := "-"
+			if job.ScheduledFor != nil {
+				scheduled = job.ScheduledFor.Local().Format("2006-01-02 15:04:05")
+			}
+			cancelState := "-"
+			if status.CancelRequested {
+				cancelState = "requested"
+			}
+			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				status.JobID,
 				status.State,
 				status.Mode,
-				status.HookCompatibility,
+				cancelState,
+				status.HostSnapshots,
+				status.VerifierStatus,
 				status.Action,
 				job.ExpiresAt.Local().Format("2006-01-02 15:04:05"),
-				"unavailable",
+				scheduled,
 			)
 		}
 		if err := writer.Flush(); err != nil {

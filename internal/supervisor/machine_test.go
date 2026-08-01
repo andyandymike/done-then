@@ -13,12 +13,14 @@ func TestTransitionMatrixIsExact(t *testing.T) {
 		{StateAgentRunning, StateOrphaned},
 		{StateEvaluating, StateVerifying},
 		{StateEvaluating, StateActionIntentRecorded},
+		{StateEvaluating, StateActionFailed},
 		{StateEvaluating, StateDryRunComplete},
 		{StateEvaluating, StateNotDone},
 		{StateEvaluating, StateInvalidCompletion},
 		{StateEvaluating, StateCancelled},
 		{StateEvaluating, StateOrphaned},
 		{StateVerifying, StateActionIntentRecorded},
+		{StateVerifying, StateActionFailed},
 		{StateVerifying, StateDryRunComplete},
 		{StateVerifying, StateVerificationFailed},
 		{StateVerifying, StateCancelled},
@@ -26,7 +28,12 @@ func TestTransitionMatrixIsExact(t *testing.T) {
 		{StateActionIntentRecorded, StateActionScheduled},
 		{StateActionIntentRecorded, StateActionFailed},
 		{StateActionIntentRecorded, StateCancelled},
+		{StateActionIntentRecorded, StateActionExecutionUnverified},
+		{StateActionIntentRecorded, StateActionExecutedConfirmed},
 		{StateActionScheduled, StateCancelled},
+		{StateActionScheduled, StateActionExecutionUnverified},
+		{StateActionScheduled, StateActionExecutedConfirmed},
+		{StateActionExecutionUnverified, StateActionExecutedConfirmed},
 	}
 	expected := make(map[[2]State]bool, len(allowed))
 	for _, pair := range allowed {
@@ -45,6 +52,8 @@ func TestTransitionMatrixIsExact(t *testing.T) {
 		StateInvalidCompletion,
 		StateVerificationFailed,
 		StateActionFailed,
+		StateActionExecutionUnverified,
+		StateActionExecutedConfirmed,
 		StateCancelled,
 		StateOrphaned,
 	}

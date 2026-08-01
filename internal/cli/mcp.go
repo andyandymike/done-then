@@ -26,7 +26,11 @@ func mcpCommand(ctx context.Context, args []string, streams IO, deps dependencie
 	if err != nil {
 		return runtimeError(streams.Stderr, supervisor.ExitStateError, "initialize plugin state", err)
 	}
-	service, err := pluginapi.New(state)
+	options := pluginapi.Options{
+		Backend:                  deps.newActionBackend(),
+		ExecuteUnavailableReason: "plugin execute is disabled until Codex provides a verified same-host App Server attachment; policy capture alone cannot enable it",
+	}
+	service, err := pluginapi.NewWithOptions(state, options)
 	if err != nil {
 		return runtimeError(streams.Stderr, supervisor.ExitStateError, "initialize plugin service", err)
 	}

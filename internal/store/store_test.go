@@ -75,7 +75,9 @@ func TestStoreRecoverPreActionDoesNotTouchPowerIntent(t *testing.T) {
 }
 
 func TestStoreRejectsCorruptAndTraversalRecords(t *testing.T) {
-	jobStore, err := New(t.TempDir())
+	root := t.TempDir()
+	registerRetryingTempCleanup(t, root)
+	jobStore, err := New(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +99,21 @@ func TestStoreRejectsCorruptAndTraversalRecords(t *testing.T) {
 	if _, err := jobStore.Load(invalidState.JobID); err == nil {
 		t.Fatal("Load() accepted an unknown state")
 	}
+}
+
+func registerRetryingTempCleanup(t *testing.T, path string) {
+	t.Helper()
+	t.Cleanup(func() {
+		var err error
+		for attempt := 0; attempt < 20; attempt++ {
+			err = os.RemoveAll(path)
+			if err == nil {
+				return
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		t.Errorf("remove transient test directory %s: %v", path, err)
+	})
 }
 
 func TestAppendEventContainsNoPromptOrTranscriptFields(t *testing.T) {

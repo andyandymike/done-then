@@ -1,15 +1,22 @@
 ---
 layout: default
 title: Local plugin development
-description: Install and verify the observe-only DoneThen Codex plugin without overwriting existing Hooks.
+description: Install and verify DoneThen's default dry-run Codex plugin without overwriting existing Hooks.
 ---
 
 # Local plugin development
 
 This guide installs the DoneThen plugin through a disposable local Codex
-marketplace and verifies one real Codex task without enabling a power action.
-The plugin remains observe-only: its MCP API rejects execute mode before job
-creation, and the live-smoke harness never calls a shutdown command.
+marketplace and verifies one real Codex task in dry-run mode. Plugin power is
+disabled by default. The live-smoke harness never installs a power policy,
+starts an execute supervisor, or calls a platform action backend.
+
+The source tree also contains a conditional execute implementation. It is not
+part of this smoke workflow and does not represent accepted platform support.
+The public MCP server keeps execute unavailable even after an owner-controlled
+policy is captured, because policy identity is not authoritative same-host
+evidence. A future host integration must supply that proof before the remaining
+execute gates can be evaluated.
 
 Codex loads plugin Hooks alongside user, project, managed, and other-plugin
 Hooks. It does not replace those sources. Plugin Hooks also require a manual
@@ -167,7 +174,7 @@ Inspect installation state without changing it:
 pwsh -NoProfile -File .\scripts\dev-plugin.ps1 -Action Status
 ```
 
-Cancel an unfinished observe-only job even if the plugin is disabled:
+Cancel an unfinished dry-run job even if the plugin is disabled:
 
 ```powershell
 .\bin\donethen.exe cancel <job-id>

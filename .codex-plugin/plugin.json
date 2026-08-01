@@ -1,7 +1,7 @@
 {
   "name": "done-then",
   "version": "0.1.0",
-  "description": "Safely observe Codex task completion before a post-task action.",
+  "description": "Verify Codex task completion before an optional, cancellable post-task action.",
   "author": {
     "name": "andyandymike",
     "url": "https://github.com/andyandymike"
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Done Then",
     "shortDescription": "Safe post-task action intent for Codex",
-    "longDescription": "Arm a time-limited action intent, report structured completion, and observe Codex lifecycle events without replacing existing hooks.",
+    "longDescription": "Arm a time-limited grant, verify structured completion with host and optional independent evidence, and schedule a cancellable post-task action without replacing existing hooks.",
     "developerName": "andyandymike",
     "category": "Productivity",
     "capabilities": [

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/andyandymike/done-then/internal/filetrust"
 )
 
 type fileStateLock struct {
@@ -16,9 +18,14 @@ type fileStateLock struct {
 }
 
 func acquireStateLock(root string, timeout time.Duration) (stateLock, error) {
-	file, err := os.OpenFile(filepath.Join(root, ".state.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	path := filepath.Join(root, ".state.lock")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open plugin state lock: %w", err)
+	}
+	if err := filetrust.HardenOwnerControlled(path); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("secure plugin state lock: %w", err)
 	}
 	deadline := time.Now().Add(timeout)
 	for {

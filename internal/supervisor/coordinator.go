@@ -106,7 +106,7 @@ func New(config Config) (*Coordinator, error) {
 func (c *Coordinator) Run(ctx context.Context) Outcome {
 	now := c.config.Now().UTC()
 	job := Job{
-		SchemaVersion: "1",
+		SchemaVersion: "2",
 		JobID:         c.config.JobID,
 		NonceHash:     c.config.NonceHash,
 		State:         StateArmed,
@@ -224,8 +224,44 @@ func (c *Coordinator) Run(ctx context.Context) Outcome {
 		return outcome
 	}
 
-	intentAt := c.config.Now().UTC()
+	comment := fmt.Sprintf("DoneThen job %s completed", shortJobID(job.JobID))
+	request := actions.PowerRequest{
+		JobID:       job.JobID,
+		Action:      job.Action,
+		Delay:       c.config.Delay,
+		Comment:     comment,
+		RequestedAt: c.config.Now().UTC(),
+	}
+	capabilities, err := c.config.Backend.Preflight(ctx, request)
+	if err != nil || !capabilities.ExecuteSupported {
+		exit := 1
+		job.PowerCapabilities = &capabilities
+		if outcome := c.move(&job, StateActionFailed, "platform_preflight_failed", &exit, 0); outcome != nil {
+			return *outcome
+		}
+		reason := "platform action preflight rejected shutdown"
+		if err != nil {
+			reason = err.Error()
+		} else if capabilities.Reason != "" {
+			reason = capabilities.Reason
+		}
+		return Outcome{JobID: job.JobID, State: job.State, Reason: reason, ExitCode: ExitActionFailed}
+	}
+	job.PowerCapabilities = &capabilities
+
+	intentAt := request.RequestedAt.UTC()
 	job.ActionIntentAt = &intentAt
+	intentReceipt, intentErr := actions.BuildIntentReceipt(job.JobID, job.Action, intentAt, request.Delay, capabilities)
+	if intentErr != nil {
+		exit := 1
+		if outcome := c.move(&job, StateActionFailed, "intent_recovery_receipt_failed", &exit, 0); outcome != nil {
+			return *outcome
+		}
+		return Outcome{JobID: job.JobID, State: job.State, Reason: intentErr.Error(), ExitCode: ExitStateError}
+	}
+	job.PowerReceipt = &intentReceipt
+	intentDeadline := intentReceipt.Deadline.UTC()
+	job.ScheduledFor = &intentDeadline
 	if outcome := c.move(&job, StateActionIntentRecorded, defaultCompletionReason, nil, 0); outcome != nil {
 		return *outcome
 	}
@@ -233,42 +269,123 @@ func (c *Coordinator) Run(ctx context.Context) Outcome {
 		return outcome
 	}
 
-	comment := fmt.Sprintf("DoneThen job %s completed", shortJobID(job.JobID))
-	if err := c.config.Backend.ScheduleShutdown(ctx, c.config.Delay, comment); err != nil {
-		exit := 1
-		job.ActionExitCode = &exit
-		if outcome := c.move(&job, StateActionFailed, "action_failed", &exit, 0); outcome != nil {
-			return *outcome
+	receipt, err := c.config.Backend.Schedule(ctx, request)
+	if err != nil {
+		job.ReasonCode = "power_schedule_outcome_unknown"
+		if saveErr := c.config.Store.Save(job); saveErr != nil {
+			return storageOutcome(job, "persist unresolved schedule outcome", saveErr, true)
 		}
-		return Outcome{JobID: job.JobID, State: job.State, Reason: err.Error(), ExitCode: ExitActionFailed}
+		cancelRequested, cancelReadErr := c.config.Store.Cancelled(job.JobID)
+		if cancelRequested || cancelReadErr != nil {
+			cancelResult, cancelErr := c.config.Backend.Cancel(ctx, intentReceipt)
+			job.CancelResult = &cancelResult
+			if cancelErr == nil || errors.Is(cancelErr, actions.ErrNoShutdownInProgress) {
+				job.CancelRequested = true
+				reason := "cancelled_after_unknown_schedule_outcome"
+				exitCode := ExitCancelled
+				message := "the schedule result was unknown, but the requested cancellation was confirmed"
+				if cancelReadErr != nil {
+					reason = "cancel_state_unreadable_unknown_action_rolled_back"
+					exitCode = ExitStateError
+					message = "cancellation state was unreadable, so the unknown action was conservatively rolled back"
+				}
+				if outcome := c.move(&job, StateCancelled, reason, nil, 0); outcome != nil {
+					outcome.ActionMayBeScheduled = false
+					return *outcome
+				}
+				return Outcome{JobID: job.JobID, State: job.State, Reason: message, ExitCode: exitCode}
+			}
+			job.ReasonCode = "unknown_schedule_cancel_unconfirmed"
+			if saveErr := c.config.Store.Save(job); saveErr != nil {
+				return storageOutcome(job, "persist unconfirmed cancellation after unknown schedule outcome", saveErr, true)
+			}
+			return Outcome{
+				JobID: job.JobID, State: job.State,
+				Reason:               fmt.Sprintf("schedule outcome is unknown and cancellation was not confirmed: schedule: %v; cancel: %v", err, cancelErr),
+				ExitCode:             ExitActionFailed,
+				ActionMayBeScheduled: true,
+			}
+		}
+		return Outcome{JobID: job.JobID, State: job.State, Reason: err.Error() + "; cancel or reconcile the unresolved action intent", ExitCode: ExitActionFailed, ActionMayBeScheduled: true}
+	}
+	if err := actions.ValidateReceiptForRequest(receipt, request, capabilities); err != nil {
+		reason := "backend returned a receipt that does not match the power request"
+		reason = fmt.Sprintf("backend returned an invalid power receipt: %v", err)
+		cancelResult, cancelErr := c.config.Backend.Cancel(ctx, intentReceipt)
+		job.CancelResult = &cancelResult
+		if cancelErr == nil || errors.Is(cancelErr, actions.ErrNoShutdownInProgress) {
+			exit := 1
+			if outcome := c.move(&job, StateActionFailed, "invalid_receipt_action_rolled_back", &exit, 0); outcome != nil {
+				return *outcome
+			}
+			return Outcome{JobID: job.JobID, State: job.State, Reason: reason + "; recovery cancellation completed", ExitCode: ExitStateError}
+		}
+		job.ReasonCode = "invalid_receipt_cancel_unconfirmed"
+		if saveErr := c.config.Store.Save(job); saveErr != nil {
+			return storageOutcome(job, "persist unconfirmed recovery cancellation", saveErr, true)
+		}
+		return Outcome{
+			JobID:                job.JobID,
+			State:                job.State,
+			Reason:               reason + "; recovery cancellation was not confirmed",
+			ExitCode:             ExitStateError,
+			ActionMayBeScheduled: true,
+		}
 	}
 
 	exit := 0
 	job.ActionExitCode = &exit
-	scheduledFor := c.config.Now().UTC().Add(c.config.Delay)
+	job.PowerReceipt = &receipt
+	scheduledFor := receipt.Deadline.UTC()
 	job.ScheduledFor = &scheduledFor
 	if outcome := c.move(&job, StateActionScheduled, "action_scheduled", &exit, 0); outcome != nil {
+		cancelResult, cancelErr := c.config.Backend.Cancel(ctx, receipt)
+		job.CancelResult = &cancelResult
+		if cancelErr == nil || errors.Is(cancelErr, actions.ErrNoShutdownInProgress) {
+			if rollbackOutcome := c.move(&job, StateCancelled, "scheduled_state_persist_failed_rolled_back", nil, 0); rollbackOutcome != nil {
+				rollbackOutcome.ActionMayBeScheduled = true
+				rollbackOutcome.Reason = "the platform accepted shutdown and rollback ran, but the cancelled state could not be persisted; run donethen cancel " + job.JobID
+				return *rollbackOutcome
+			}
+			return Outcome{JobID: job.JobID, State: job.State, Reason: "the scheduled state could not be persisted; the platform action was rolled back", ExitCode: ExitStateError}
+		}
 		outcome.ActionMayBeScheduled = true
-		outcome.Reason = "Windows accepted shutdown, but the scheduled state could not be persisted; run donethen cancel " + job.JobID
+		outcome.Reason = "the platform accepted shutdown, but neither scheduled-state persistence nor rollback was confirmed; run donethen cancel " + job.JobID
 		return *outcome
 	}
 	cancelledAfterSchedule, cancelErr := c.config.Store.Cancelled(job.JobID)
 	if cancelErr != nil {
+		cancelResult, rollbackErr := c.config.Backend.Cancel(ctx, receipt)
+		job.CancelResult = &cancelResult
+		if rollbackErr == nil || errors.Is(rollbackErr, actions.ErrNoShutdownInProgress) {
+			job.CancelRequested = true
+			if outcome := c.move(&job, StateCancelled, "cancel_state_unreadable_action_rolled_back", nil, 0); outcome != nil {
+				outcome.ActionMayBeScheduled = false
+				outcome.Reason = fmt.Sprintf("cancellation state could not be rechecked, but backend rollback completed; persist cancelled state: %v", outcome.Reason)
+				return *outcome
+			}
+			return Outcome{
+				JobID: job.JobID, State: job.State,
+				Reason:   fmt.Sprintf("cancellation state could not be rechecked, so the accepted shutdown was rolled back: %v", cancelErr),
+				ExitCode: ExitStateError,
+			}
+		}
 		return Outcome{
 			JobID:                job.JobID,
 			State:                job.State,
-			Reason:               fmt.Sprintf("Windows accepted shutdown, but cancellation state could not be rechecked: %v", cancelErr),
+			Reason:               fmt.Sprintf("the platform accepted shutdown, but cancellation state could not be rechecked and rollback was not confirmed: %v; rollback: %v", cancelErr, rollbackErr),
 			ExitCode:             ExitStateError,
 			ActionMayBeScheduled: true,
 		}
 	}
 	if cancelledAfterSchedule {
-		abortErr := c.config.Backend.AbortShutdown(ctx)
-		if abortErr != nil && !errors.Is(abortErr, actions.ErrNoShutdownInProgress) {
+		cancelResult, cancelErr := c.config.Backend.Cancel(ctx, receipt)
+		job.CancelResult = &cancelResult
+		if cancelErr != nil && !errors.Is(cancelErr, actions.ErrNoShutdownInProgress) {
 			return Outcome{
 				JobID:                job.JobID,
 				State:                job.State,
-				Reason:               fmt.Sprintf("cancellation was requested after scheduling, but Windows abort failed: %v", abortErr),
+				Reason:               fmt.Sprintf("cancellation was requested after scheduling, but backend cancellation failed: %v", cancelErr),
 				ExitCode:             ExitActionFailed,
 				ActionMayBeScheduled: true,
 			}
@@ -280,7 +397,7 @@ func (c *Coordinator) Run(ctx context.Context) Outcome {
 		}
 		return Outcome{JobID: job.JobID, State: job.State, Reason: "shutdown countdown was cancelled", ExitCode: ExitCancelled}
 	}
-	return Outcome{JobID: job.JobID, State: job.State, Reason: fmt.Sprintf("Windows shutdown scheduled for %s", scheduledFor.Format(time.RFC3339)), ExitCode: ExitOK, ActionMayBeScheduled: true, CompletionSummaryOnly: envelope.Summary}
+	return Outcome{JobID: job.JobID, State: job.State, Reason: fmt.Sprintf("shutdown scheduled by %s for %s", receipt.BackendID, scheduledFor.Format(time.RFC3339)), ExitCode: ExitOK, ActionMayBeScheduled: true, CompletionSummaryOnly: envelope.Summary}
 }
 
 func (c *Coordinator) cancelled(job Job, reason string) (bool, Outcome) {

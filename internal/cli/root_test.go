@@ -19,6 +19,7 @@ import (
 	"github.com/andyandymike/done-then/internal/identity"
 	"github.com/andyandymike/done-then/internal/platform"
 	"github.com/andyandymike/done-then/internal/pluginstate"
+	"github.com/andyandymike/done-then/internal/powerpolicy"
 	"github.com/andyandymike/done-then/internal/store"
 	"github.com/andyandymike/done-then/internal/supervisor"
 )
@@ -109,6 +110,67 @@ func TestMCPCommandWritesOnlyJSONRPCResponses(t *testing.T) {
 	}
 }
 
+func TestPublicMCPRejectsExecuteEvenWithInstalledPolicy(t *testing.T) {
+	root := t.TempDir()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := powerpolicy.Install(root, powerpolicy.Policy{
+		SchemaVersion:      1,
+		ExecuteEnabled:     true,
+		CodexExecutable:    executable,
+		ExpectedPluginID:   "done-then@test",
+		ExpectedHookHashes: map[string]string{"plugin:done-then:test": "sha256:reviewed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &actions.FakeBackend{}
+	deps := testDependencies(root, backend, nil)
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cli-test","version":"1"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"arm","arguments":{"action":"shutdown","delay_seconds":120,"expires_in_seconds":3600,"mode":"execute","verifier_profile":"none","allow_agent_only_success":true}}}`,
+	}, "\n")
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies(context.Background(), []string{"mcp"}, IO{
+		Stdin: strings.NewReader(input), Stdout: &stdout, Stderr: &stderr,
+	}, deps)
+	if exitCode != 0 || stderr.Len() != 0 {
+		t.Fatalf("mcp exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	decoder := json.NewDecoder(&stdout)
+	var initialize map[string]any
+	if err := decoder.Decode(&initialize); err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err := decoder.Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	result, ok := response["result"].(map[string]any)
+	if !ok || result["isError"] != true {
+		t.Fatalf("execute call did not fail closed: %#v", response)
+	}
+	structured, ok := result["structuredContent"].(map[string]any)
+	if !ok || structured["reason_code"] != "execute_unavailable" ||
+		structured["execute_available"] != false ||
+		structured["power_action_called"] != false {
+		t.Fatalf("execute result = %#v", structured)
+	}
+	content, ok := result["content"].([]any)
+	if !ok || len(content) != 1 {
+		t.Fatalf("execute rejection content = %#v", result["content"])
+	}
+	textContent, ok := content[0].(map[string]any)
+	if !ok || !strings.Contains(fmt.Sprint(textContent["text"]), "same-host") {
+		t.Fatalf("execute rejection did not explain the authority boundary: %#v", content)
+	}
+	if backend.PreflightCalls != 0 || backend.ScheduleCalls != 0 || backend.CancelCalls != 0 {
+		t.Fatalf("public MCP reached the power backend: %#v", backend)
+	}
+}
+
 func TestStatusAndCancelRecoverObserveOnlyPluginJob(t *testing.T) {
 	root := t.TempDir()
 	state, err := pluginstate.New(root)
@@ -144,7 +206,7 @@ func TestStatusAndCancelRecoverObserveOnlyPluginJob(t *testing.T) {
 	exitCode := runWithDependencies(context.Background(), []string{"status", job.JobID}, IO{
 		Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
 	}, deps)
-	if exitCode != 0 || !strings.Contains(stdout.String(), "PLUGIN JOB ID") || !strings.Contains(stdout.String(), "unavailable") {
+	if exitCode != 0 || !strings.Contains(stdout.String(), "PLUGIN JOB ID") || !strings.Contains(stdout.String(), "0/3") || !strings.Contains(stdout.String(), "agent-only") {
 		t.Fatalf("plugin status exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
 	}
 	stdout.Reset()
@@ -158,6 +220,207 @@ func TestStatusAndCancelRecoverObserveOnlyPluginJob(t *testing.T) {
 	cancelled, err := state.Load(job.JobID)
 	if err != nil || cancelled.State != pluginstate.StateCancelled {
 		t.Fatalf("cancelled plugin job = %#v, %v", cancelled, err)
+	}
+}
+
+func TestCancelPersistsPluginActionIntentRequestUntilSchedulerSettles(t *testing.T) {
+	root := t.TempDir()
+	state, err := pluginstate.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	capabilities := actions.Capabilities{
+		Platform: "fake", BackendID: "fake", ExecuteSupported: true, CancelScope: actions.CancelScopeJob,
+		MinimumDelay: 30 * time.Second, MaximumDelay: time.Hour, ReconcileSupported: true,
+	}
+	receipt, err := actions.BuildIntentReceipt(jobIdentity.JobID, "shutdown", now, 2*time.Minute, capabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := receipt.Deadline
+	job := pluginstate.Job{
+		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
+		State: pluginstate.StateActionIntent, ReasonCode: "power_schedule_outcome_unknown", Action: "shutdown", DelaySeconds: 120,
+		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, SessionID: "thread-1", ArmTurnID: "turn-1",
+		Generation: 2, VerifierProfile: "none", AllowAgentOnlySuccess: true, HookCompatibility: "compatible",
+		ArmObserved: true, WorkspaceCWD: root, PowerPolicyFingerprint: "sha256:policy", ActionIntentAt: &now,
+		ScheduledFor: &deadline, PowerCapabilities: &capabilities, PowerReceipt: &receipt,
+	}
+	if err := state.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	backend := &actions.FakeBackend{}
+	deps := testDependencies(root, backend, nil)
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies(context.Background(), []string{"cancel", job.JobID}, IO{
+		Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
+	}, deps)
+	if exitCode != 0 || !strings.Contains(stdout.String(), "unresolved scheduler boundary") {
+		t.Fatalf("cancel exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	updated, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != pluginstate.StateActionIntent || !updated.CancelRequested ||
+		updated.CancelReason != "cli_cancelled_by_user" || updated.CancelResult == nil {
+		t.Fatalf("unresolved cancelled intent = %#v", updated)
+	}
+	_, cancelCalls, _, _ := backend.Snapshot()
+	if cancelCalls != 1 {
+		t.Fatalf("backend cancel calls = %d", cancelCalls)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if exitCode := runWithDependencies(context.Background(), []string{"status", job.JobID}, IO{
+		Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
+	}, deps); exitCode != 0 || !strings.Contains(stdout.String(), "CANCEL") || !strings.Contains(stdout.String(), "requested") {
+		t.Fatalf("status exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+}
+
+func TestDoctorIsReadOnlyAtPowerBoundary(t *testing.T) {
+	root := t.TempDir()
+	backend := &actions.FakeBackend{}
+	deps := testDependencies(root, backend, nil)
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies(context.Background(), []string{"doctor", "--json"}, IO{
+		Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
+	}, deps)
+	if exitCode != 0 {
+		t.Fatalf("doctor exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	var report doctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.ExecuteAvailable {
+		t.Fatal("doctor enabled execute without a local policy")
+	}
+	scheduleCalls, cancelCalls, _, _ := backend.Snapshot()
+	if scheduleCalls != 0 || cancelCalls != 0 || backend.ReconcileCalls != 0 || backend.PreflightCalls != 1 {
+		t.Fatalf("doctor backend calls: preflight=%d schedule=%d cancel=%d reconcile=%d", backend.PreflightCalls, scheduleCalls, cancelCalls, backend.ReconcileCalls)
+	}
+}
+
+func TestReconcilePluginReceiptNeverRetriesAction(t *testing.T) {
+	root := t.TempDir()
+	state, err := pluginstate.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	capabilities := actions.Capabilities{
+		Platform: "fake", BackendID: "fake", ExecuteSupported: true, CancelScope: actions.CancelScopeJob,
+		MinimumDelay: 30 * time.Second, MaximumDelay: time.Hour, ReconcileSupported: true,
+	}
+	receipt := actions.SealReceipt(actions.Receipt{
+		Platform: "fake", BackendID: "fake", BackendVersion: "1", JobID: jobIdentity.JobID, Action: "shutdown",
+		RequestedAt: now, ScheduledAt: now, Deadline: now.Add(2 * time.Minute), CancelScope: actions.CancelScopeJob,
+	})
+	deadline := receipt.Deadline
+	job := pluginstate.Job{
+		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
+		State: pluginstate.StateActionScheduled, ReasonCode: "action_scheduled", Action: "shutdown", DelaySeconds: 120,
+		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, SessionID: "thread-1", ArmTurnID: "turn-1",
+		Generation: 2, VerifierProfile: "none", AllowAgentOnlySuccess: true, HookCompatibility: "compatible",
+		ArmObserved: true, WorkspaceCWD: root, PowerPolicyFingerprint: "sha256:policy", ActionIntentAt: &now,
+		ScheduledFor: &deadline, PowerCapabilities: &capabilities, PowerReceipt: &receipt,
+	}
+	if err := state.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	backend := &actions.FakeBackend{ReconcileResult: actions.ReconcileResult{
+		State: actions.ReconcileUnverified, CheckedAt: now.Add(3 * time.Minute), Evidence: "fake evidence remains inconclusive",
+	}}
+	deps := testDependencies(root, backend, nil)
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies(context.Background(), []string{"reconcile", job.JobID}, IO{
+		Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
+	}, deps)
+	if exitCode != 0 || !strings.Contains(stdout.String(), string(actions.ReconcileUnverified)) {
+		t.Fatalf("reconcile exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	updated, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != pluginstate.StateActionExecutionUnverified || updated.ReconcileResult == nil {
+		t.Fatalf("reconciled job = %#v", updated)
+	}
+	scheduleCalls, cancelCalls, _, _ := backend.Snapshot()
+	if scheduleCalls != 0 || cancelCalls != 0 || backend.ReconcileCalls != 1 {
+		t.Fatalf("reconcile backend calls: schedule=%d cancel=%d reconcile=%d", scheduleCalls, cancelCalls, backend.ReconcileCalls)
+	}
+}
+
+func TestEarlyUnverifiedReconcileKeepsPluginCountdownCancellable(t *testing.T) {
+	root := t.TempDir()
+	state, err := pluginstate.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	capabilities := actions.Capabilities{
+		Platform: "fake", BackendID: "fake", ExecuteSupported: true, CancelScope: actions.CancelScopeJob,
+		MinimumDelay: 30 * time.Second, MaximumDelay: time.Hour, ReconcileSupported: true,
+	}
+	receipt := actions.SealReceipt(actions.Receipt{
+		Platform: "fake", BackendID: "fake", BackendVersion: "1", JobID: jobIdentity.JobID, Action: "shutdown",
+		RequestedAt: now, ScheduledAt: now, Deadline: now.Add(5 * time.Minute), CancelScope: actions.CancelScopeJob,
+	})
+	deadline := receipt.Deadline
+	job := pluginstate.Job{
+		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
+		State: pluginstate.StateActionScheduled, ReasonCode: "action_scheduled", Action: "shutdown", DelaySeconds: 300,
+		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, SessionID: "thread-1", ArmTurnID: "turn-1",
+		Generation: 2, VerifierProfile: "none", AllowAgentOnlySuccess: true, HookCompatibility: "compatible",
+		ArmObserved: true, WorkspaceCWD: root, PowerPolicyFingerprint: "sha256:policy", ActionIntentAt: &now,
+		ScheduledFor: &deadline, PowerCapabilities: &capabilities, PowerReceipt: &receipt,
+	}
+	if err := state.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	backend := &actions.FakeBackend{ReconcileResult: actions.ReconcileResult{
+		State: actions.ReconcileUnverified, CheckedAt: now.Add(time.Minute), Evidence: "status query was inconclusive",
+	}}
+	deps := testDependencies(root, backend, nil)
+	var stdout, stderr bytes.Buffer
+	if exitCode := runWithDependencies(context.Background(), []string{"reconcile", job.JobID}, IO{
+		Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
+	}, deps); exitCode != 0 {
+		t.Fatalf("reconcile exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	updated, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != pluginstate.StateActionScheduled || updated.ReasonCode != "execution_unverified_before_deadline" {
+		t.Fatalf("early reconcile discarded cancellation path: %#v", updated)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if exitCode := runWithDependencies(context.Background(), []string{"cancel", job.JobID}, IO{
+		Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
+	}, deps); exitCode != 0 {
+		t.Fatalf("cancel exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	updated, err = state.Load(job.JobID)
+	if err != nil || updated.State != pluginstate.StateCancelled || backend.CancelCalls != 1 {
+		t.Fatalf("cancelled job=%#v cancel_calls=%d err=%v", updated, backend.CancelCalls, err)
 	}
 }
 
@@ -249,6 +512,7 @@ func TestRunDryRunEndToEndWithFakeCodexAndVerifier(t *testing.T) {
 func TestRunExecuteAndCancelEndToEndUseOnlyInjectedBackend(t *testing.T) {
 	t.Setenv("DONETHEN_CLI_CODEX_HELPER", "1")
 	root := t.TempDir()
+	registerRetryingTempCleanup(t, root)
 	backend := &actions.FakeBackend{}
 	lock := &testPowerLock{}
 	deps := testDependencies(root, backend, lock)
@@ -318,6 +582,21 @@ func TestRunExecuteAndCancelEndToEndUseOnlyInjectedBackend(t *testing.T) {
 	if exitCode != 0 || !strings.Contains(stdout.String(), "CANCEL") || !strings.Contains(stdout.String(), "requested") {
 		t.Fatalf("status exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
 	}
+}
+
+func registerRetryingTempCleanup(t *testing.T, path string) {
+	t.Helper()
+	t.Cleanup(func() {
+		var err error
+		for attempt := 0; attempt < 20; attempt++ {
+			err = os.RemoveAll(path)
+			if err == nil {
+				return
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		t.Errorf("remove transient test directory %s: %v", path, err)
+	})
 }
 
 func TestRunStdinPromptAndArtifactCleanupEndToEnd(t *testing.T) {
