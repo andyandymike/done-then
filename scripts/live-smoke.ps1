@@ -543,6 +543,8 @@ if (Test-Path -LiteralPath $eventPath -PathType Leaf) {
 }
 
 if ($null -ne $job) {
+    $completionStatusProperty = $job.PSObject.Properties['completion_status']
+    $completionEvidenceProperty = $job.PSObject.Properties['completion_evidence_hash']
     $jobChecks = [ordered]@{
         schema_version           = [string]$job.schema_version -eq '3'
         identity                 = [string]$job.job_id -eq $JobId
@@ -556,8 +558,8 @@ if ($null -ne $job) {
         hook_compatibility       = [string]$job.hook_compatibility -eq 'session_bound'
         arm_observed             = [bool]$job.arm_observed
         finish_not_observed      = -not [bool]$job.finish_observed
-        no_completion_status     = [string]::IsNullOrWhiteSpace([string]$job.completion_status)
-        no_completion_evidence   = [string]::IsNullOrWhiteSpace([string]$job.completion_evidence_hash)
+        no_completion_status     = $null -eq $completionStatusProperty -or [string]::IsNullOrWhiteSpace([string]$completionStatusProperty.Value)
+        no_completion_evidence   = $null -eq $completionEvidenceProperty -or [string]::IsNullOrWhiteSpace([string]$completionEvidenceProperty.Value)
         stop_turn_bound          = -not [string]::IsNullOrWhiteSpace([string]$job.stop_turn_id)
     }
     foreach ($check in $jobChecks.GetEnumerator()) {
