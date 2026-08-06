@@ -214,7 +214,7 @@ func (s *Service) arm(ctx context.Context, raw json.RawMessage) Result {
 	if triggerPolicy == pluginstate.TriggerAfterStop && args.Mode == "execute" {
 		request := actions.PowerRequest{
 			JobID: jobIdentity.JobID, Action: args.Action, Delay: time.Duration(args.DelaySeconds) * time.Second,
-			Comment: "DoneThen after-stop preflight", RequestedAt: now,
+			Comment: actions.AfterStopPowerComment(jobIdentity.JobID), RequestedAt: now,
 		}
 		capabilities, preflightErr := s.backend.Preflight(ctx, request)
 		if preflightErr != nil || !capabilities.ExecuteSupported {

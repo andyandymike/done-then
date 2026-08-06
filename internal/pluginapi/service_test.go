@@ -128,6 +128,9 @@ func TestAfterStopExecuteRequiresAcknowledgementAndOnlyPreflightsAtArm(t *testin
 	if backend.PreflightCalls != 1 || scheduleCalls != 0 {
 		t.Fatalf("arm backend calls: preflight=%d schedule=%d", backend.PreflightCalls, scheduleCalls)
 	}
+	if backend.LastRequest.Comment != actions.AfterStopPowerComment(jobID) {
+		t.Fatalf("after-stop preflight comment = %q", backend.LastRequest.Comment)
+	}
 }
 
 func TestArmExpiryCannotExceedOneDay(t *testing.T) {

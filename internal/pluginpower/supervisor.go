@@ -358,9 +358,9 @@ func (s *Supervisor) schedule(ctx context.Context, jobID string) error {
 
 	now := s.config.Now().UTC()
 	delay := time.Duration(current.DelaySeconds) * time.Second
-	comment := fmt.Sprintf("DoneThen plugin job %.20s completed", current.JobID)
+	comment := actions.PluginPowerComment(current.JobID)
 	if current.TriggerPolicy == pluginstate.TriggerAfterStop {
-		comment = fmt.Sprintf("DoneThen job %.20s: Codex stopped", current.JobID)
+		comment = actions.AfterStopPowerComment(current.JobID)
 	}
 	request := actions.PowerRequest{
 		JobID:       current.JobID,

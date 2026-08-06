@@ -66,7 +66,7 @@ func TestHelperUsesFixedSystemdTimerAndJobSpecificCancel(t *testing.T) {
 	jobID := "dt_linux_helper_test"
 	request := actions.PowerRequest{
 		JobID: jobID, Action: "shutdown", Delay: 2 * time.Minute,
-		Comment: "DoneThen plugin job " + jobID + " completed", RequestedAt: now,
+		Comment: actions.PluginPowerComment(jobID), RequestedAt: now,
 	}
 	response := s.process(context.Background(), 1000, daemonRequest{SchemaVersion: 1, Operation: "schedule", Request: &request})
 	if !response.OK || response.Receipt == nil {
@@ -100,7 +100,7 @@ func TestHelperKeepsRecoveryStateWhenSystemdSchedulingIsUncertain(t *testing.T) 
 	jobID := "dt_uncertain_schedule"
 	request := actions.PowerRequest{
 		JobID: jobID, Action: "shutdown", Delay: 2 * time.Minute,
-		Comment: "DoneThen job " + jobID + " completed", RequestedAt: now,
+		Comment: actions.ClassicPowerComment(jobID), RequestedAt: now,
 	}
 	response := s.process(context.Background(), 1000, daemonRequest{SchemaVersion: 1, Operation: "schedule", Request: &request})
 	if response.OK || response.ErrorCode != "schedule_failed" {
@@ -127,7 +127,7 @@ func TestHelperCanCancelUncertainScheduleWhenUnitsAreConfirmedInactive(t *testin
 	jobID := "dt_uncertain_cancel"
 	request := actions.PowerRequest{
 		JobID: jobID, Action: "shutdown", Delay: 2 * time.Minute,
-		Comment: "DoneThen job " + jobID + " completed", RequestedAt: now,
+		Comment: actions.ClassicPowerComment(jobID), RequestedAt: now,
 	}
 	response := s.process(context.Background(), 1000, daemonRequest{SchemaVersion: 1, Operation: "schedule", Request: &request})
 	if response.OK {
@@ -158,7 +158,7 @@ func TestTimerCallbackChecksDeadlineAndRejectsExcessiveLateness(t *testing.T) {
 	jobID := "dt_timer_lateness"
 	request := actions.PowerRequest{
 		JobID: jobID, Action: "shutdown", Delay: 2 * time.Minute,
-		Comment: "DoneThen job " + jobID + " completed", RequestedAt: now,
+		Comment: actions.ClassicPowerComment(jobID), RequestedAt: now,
 	}
 	response := s.process(context.Background(), 1000, daemonRequest{SchemaVersion: 1, Operation: "schedule", Request: &request})
 	if !response.OK || response.Receipt == nil {
@@ -190,7 +190,7 @@ func TestTimerCallbackUsesOnlyFixedPoweroffCommand(t *testing.T) {
 	jobID := "dt_timer_fire"
 	request := actions.PowerRequest{
 		JobID: jobID, Action: "shutdown", Delay: 2 * time.Minute,
-		Comment: "DoneThen plugin job " + jobID + " completed", RequestedAt: now,
+		Comment: actions.AfterStopPowerComment(jobID), RequestedAt: now,
 	}
 	response := s.process(context.Background(), 1000, daemonRequest{SchemaVersion: 1, Operation: "schedule", Request: &request})
 	if !response.OK || response.Receipt == nil {

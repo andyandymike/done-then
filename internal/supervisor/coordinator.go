@@ -224,7 +224,7 @@ func (c *Coordinator) Run(ctx context.Context) Outcome {
 		return outcome
 	}
 
-	comment := fmt.Sprintf("DoneThen job %s completed", shortJobID(job.JobID))
+	comment := actions.ClassicPowerComment(job.JobID)
 	request := actions.PowerRequest{
 		JobID:       job.JobID,
 		Action:      job.Action,
@@ -455,12 +455,4 @@ func storageOutcome(job Job, operation string, err error, actionMayBeScheduled b
 		ExitCode:             ExitStateError,
 		ActionMayBeScheduled: actionMayBeScheduled,
 	}
-}
-
-func shortJobID(jobID string) string {
-	const max = 20
-	if len(jobID) <= max {
-		return jobID
-	}
-	return jobID[:max]
 }

@@ -376,13 +376,7 @@ func validateHelperRequest(request actions.PowerRequest) error {
 	if err := actions.ValidateRequest(request, 30*time.Second, time.Hour); err != nil {
 		return err
 	}
-	short := request.JobID
-	if len(short) > 20 {
-		short = short[:20]
-	}
-	classic := "DoneThen job " + short + " completed"
-	plugin := "DoneThen plugin job " + short + " completed"
-	if request.Comment != classic && request.Comment != plugin {
+	if !actions.IsFixedPowerComment(request.JobID, request.Comment) {
 		return errors.New("power comment is not a fixed DoneThen comment")
 	}
 	return nil

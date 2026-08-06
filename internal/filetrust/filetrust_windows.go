@@ -17,6 +17,7 @@ const (
 	seFileObject              = 1
 	ownerSecurityInformation  = 0x00000001
 	daclSecurityInformation   = 0x00000004
+	protectedDACLInformation  = 0x80000000
 	errorInsufficientBuffer   = syscall.Errno(122)
 	accessAllowedACEType      = 0
 	accessDeniedACEType       = 1
@@ -219,7 +220,7 @@ func hardenWindowsACL(path string) error {
 	if err != nil {
 		return err
 	}
-	sddl, err := syscall.UTF16PtrFromString("D:P(A;;FA;;;" + sid + ")(A;;FA;;;SY)(A;;FA;;;BA)")
+	sddl, err := syscall.UTF16PtrFromString("O:" + sid + "D:P(A;;FA;;;" + sid + ")(A;;FA;;;SY)(A;;FA;;;BA)")
 	if err != nil {
 		return err
 	}
@@ -229,16 +230,20 @@ func hardenWindowsACL(path string) error {
 		uintptr(unsafe.Pointer(sddl)), 1, uintptr(unsafe.Pointer(&descriptor)), uintptr(unsafe.Pointer(&descriptorSize)),
 	)
 	if result == 0 {
-		return fmt.Errorf("build owner-only DACL: %w", callErr)
+		return fmt.Errorf("build owner-controlled security descriptor: %w", callErr)
 	}
 	defer localFreeProc.Call(descriptor)
 	pathUTF16, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
 		return err
 	}
-	result, _, callErr = setFileSecurityProc.Call(uintptr(unsafe.Pointer(pathUTF16)), daclSecurityInformation, descriptor)
+	result, _, callErr = setFileSecurityProc.Call(
+		uintptr(unsafe.Pointer(pathUTF16)),
+		ownerSecurityInformation|daclSecurityInformation|protectedDACLInformation,
+		descriptor,
+	)
 	if result == 0 {
-		return fmt.Errorf("apply owner-only DACL: %w", callErr)
+		return fmt.Errorf("apply owner-controlled security descriptor: %w", callErr)
 	}
 	return nil
 }
