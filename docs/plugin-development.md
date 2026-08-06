@@ -1,22 +1,22 @@
 ---
 layout: default
 title: Local plugin development
-description: Install and verify DoneThen's default dry-run Codex plugin without overwriting existing Hooks.
+description: Install and verify DoneThen's after-stop dry-run without overwriting existing Codex Hooks.
 ---
 
 # Local plugin development
 
 This guide installs the DoneThen plugin through a disposable local Codex
-marketplace and verifies one real Codex task in dry-run mode. Plugin power is
-disabled by default. The live-smoke harness never installs a power policy,
-starts an execute supervisor, or calls a platform action backend.
+marketplace and verifies one real Codex task in `after_stop` dry-run mode. The
+live-smoke harness never starts an execute supervisor or calls a platform
+action backend.
 
-The source tree also contains a conditional execute implementation. It is not
-part of this smoke workflow and does not represent accepted platform support.
-The public MCP server keeps execute unavailable even after an owner-controlled
-policy is captured, because policy identity is not authoritative same-host
-evidence. A future host integration must supply that proof before the remaining
-execute gates can be evaluated.
+The public MCP server can arm the default after-stop execute path on Windows or
+systemd Linux when backend preflight succeeds. That path is not part of this
+smoke workflow and does not represent completed real-host acceptance. The
+separate experimental `verified_success` execute policy remains unavailable by
+default because policy identity is not authoritative same-host App Server
+evidence.
 
 Codex loads plugin Hooks alongside user, project, managed, and other-plugin
 Hooks. It does not replace those sources. Plugin Hooks also require a manual
@@ -130,16 +130,14 @@ Run every command from the repository root.
 6. In that new Codex task, use a bounded smoke request such as:
 
    ```text
-   Use $done-then in dry-run mode for this task. Inspect README.md and report
-   the project title. When the requested work and checks are genuinely complete,
-   report structured completion. For this dry-run only, I explicitly accept
-   structured agent-only completion evidence. Keep and show the DoneThen job_id.
-   Do not invoke an operating-system power command.
+   Use $done-then in after_stop dry-run mode for this turn. Inspect README.md
+   and report the project title. Keep and show the DoneThen job_id. Do not call
+   finish and do not invoke an operating-system power command.
    ```
 
-   DoneThen should arm once, bind the `PostToolUse` event to this task, report
-   completion, observe the matching `finish` Hook, and then observe the same
-   turn's `Stop`. No countdown or power action is available.
+   DoneThen should arm once, bind the `PostToolUse` event to this task, and
+   observe the same turn's normal `Stop`. It should not report semantic
+   completion and should not create a countdown or power action.
 
 7. After the response turn stops, but before closing or archiving the Codex
    task, verify the returned job ID from a terminal:
@@ -157,14 +155,15 @@ Run every command from the repository root.
    | --- | --- |
    | Hook coexistence | All four configuration hashes and every other installed plugin manifest/Hook hash still match the pre-install baseline |
    | Runtime identity | The current runtime SHA-256 still matches the ignored development-install receipt |
-   | Job mode | `dry_run=true`, `action=shutdown`, agent-only evidence explicitly accepted |
-   | Final lifecycle | `STOP_OBSERVED` with `matching_stop_observed_no_action` |
-   | Event order | `mcp.arm`, `hook.post_tool.arm`, `mcp.finish`, `hook.post_tool.finish`, `hook.stop` |
+   | Job mode | `dry_run=true`, `action=shutdown`, `trigger_policy=after_stop`, no semantic verifier |
+   | Final lifecycle | `DRY_RUN_COMPLETE` with `after_stop_observed_no_action` |
+   | Event order | `mcp.arm`, `hook.post_tool.arm`, `hook.stop` |
    | Privacy | Event records contain only the allowlisted redacted schema and hashed session/turn identifiers |
    | Power boundary | No power, shutdown, execute, or scheduling event exists |
 
-   `STOP_OBSERVED` is lifecycle evidence, not authorization to shut down. If
-   any gate is missing, the smoke test fails closed.
+   `DRY_RUN_COMPLETE` means the lifecycle Stop was observed without scheduling
+   power. It is not a semantic success claim. If any gate is missing, the smoke
+   test fails closed.
 
 ## Status, recovery, and uninstall
 

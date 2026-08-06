@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -28,13 +29,15 @@ type Observer struct {
 }
 
 type hookInput struct {
-	SessionID     string          `json:"session_id"`
-	TurnID        string          `json:"turn_id"`
-	HookEventName string          `json:"hook_event_name"`
-	ToolName      string          `json:"tool_name"`
-	ToolUseID     string          `json:"tool_use_id"`
-	ToolInput     json.RawMessage `json:"tool_input"`
-	ToolResponse  json.RawMessage `json:"tool_response"`
+	SessionID      string          `json:"session_id"`
+	TurnID         string          `json:"turn_id"`
+	CWD            string          `json:"cwd"`
+	HookEventName  string          `json:"hook_event_name"`
+	ToolName       string          `json:"tool_name"`
+	ToolUseID      string          `json:"tool_use_id"`
+	ToolInput      json.RawMessage `json:"tool_input"`
+	ToolResponse   json.RawMessage `json:"tool_response"`
+	StopHookActive bool            `json:"stop_hook_active"`
 }
 
 func New(state *pluginstate.Store) (*Observer, error) {
@@ -96,7 +99,7 @@ func (o *Observer) postToolUse(input hookInput) error {
 	}
 	eventKey := hookEventKey(input, jobID)
 	if tool == "arm" {
-		_, _, err := o.store.BindSession(jobID, input.SessionID, input.TurnID, eventKey)
+		_, _, err := o.store.BindSession(jobID, input.SessionID, input.TurnID, input.CWD, eventKey)
 		return err
 	}
 	_, _, err = o.store.UpdateJob(jobID, "hook.post_tool."+tool, eventKey, func(job *pluginstate.Job, now time.Time) error {
@@ -155,6 +158,14 @@ func (o *Observer) userPromptSubmit(input hookInput) error {
 			clearCompletion(job)
 			return nil
 		}
+		if job.TriggerPolicy == pluginstate.TriggerAfterStop {
+			job.Generation++
+			job.State = pluginstate.StateCancelled
+			job.ReasonCode = "new_prompt_cancelled_after_stop_grant"
+			job.CancelRequested = true
+			job.CancelReason = "new_prompt_cancelled_after_stop_grant"
+			return nil
+		}
 		job.Generation++
 		job.CurrentTurnID = input.TurnID
 		job.State = pluginstate.StateArmed
@@ -174,8 +185,10 @@ func (o *Observer) stop(input hookInput) error {
 		if job.State.IsTerminal() {
 			return nil
 		}
-		if pluginstate.HasUnresolvedPowerAction(*job) && input.TurnID != job.StopTurnID {
-			requestPowerCancellation(job, "later_stop_requested_power_cancel")
+		if pluginstate.HasUnresolvedPowerAction(*job) {
+			if job.TriggerPolicy == pluginstate.TriggerAfterStop || input.TurnID != job.StopTurnID {
+				requestPowerCancellation(job, "continuation_after_stop_requested_power_cancel")
+			}
 			return nil
 		}
 		if job.Expired(now) {
@@ -183,6 +196,42 @@ func (o *Observer) stop(input hookInput) error {
 			job.State = pluginstate.StateExpired
 			job.ReasonCode = "arm_expired"
 			clearCompletion(job)
+			return nil
+		}
+		if job.TriggerPolicy == pluginstate.TriggerAfterStop {
+			if input.StopHookActive {
+				job.Generation++
+				job.State = pluginstate.StateCancelled
+				job.ReasonCode = "stop_hook_continuation_cancelled_grant"
+				job.CancelRequested = true
+				job.CancelReason = "stop_hook_continuation_cancelled_grant"
+				return nil
+			}
+			if !job.DryRun && !pluginstate.WorkspaceMatches(job.WorkspaceCWD, input.CWD) {
+				job.Generation++
+				job.State = pluginstate.StateHookUnavailable
+				job.ReasonCode = "stop_workspace_mismatch"
+				return nil
+			}
+			if job.State == pluginstate.StateStopObserved {
+				job.Generation++
+				job.State = pluginstate.StateCancelled
+				job.ReasonCode = "continuation_after_stop_cancelled_grant"
+				job.CancelRequested = true
+				job.CancelReason = "continuation_after_stop_cancelled_grant"
+				return nil
+			}
+			if job.State != pluginstate.StateArmed || input.TurnID != job.CurrentTurnID {
+				return nil
+			}
+			job.StopTurnID = input.TurnID
+			if job.DryRun {
+				job.State = pluginstate.StateDryRunComplete
+				job.ReasonCode = "after_stop_observed_no_action"
+			} else {
+				job.State = pluginstate.StateStopObserved
+				job.ReasonCode = "after_stop_observed_awaiting_countdown"
+			}
 			return nil
 		}
 		if job.State != pluginstate.StateReadyPendingStop {
@@ -215,6 +264,12 @@ func (o *Observer) sessionEnd(input hookInput) error {
 	eventKey := hookEventKey(input, "")
 	_, _, _, err := o.store.UpdateSession(input.SessionID, "", "hook.session_end", eventKey, func(job *pluginstate.Job, _ time.Time) error {
 		if job.State.IsTerminal() {
+			return nil
+		}
+		if job.TriggerPolicy == pluginstate.TriggerAfterStop &&
+			(job.State == pluginstate.StateStopObserved || pluginstate.HasUnresolvedPowerAction(*job)) {
+			// Once the matching Stop has been accepted, closing Codex must not
+			// silently revoke the user's explicit after-stop shutdown request.
 			return nil
 		}
 		if requestPowerCancellation(job, "session_end_requested_power_cancel") {
@@ -267,6 +322,9 @@ func validateTurnInput(input hookInput) error {
 	}
 	if len(input.ToolUseID) > 1024 {
 		return errors.New("hook input has an invalid tool_use_id")
+	}
+	if len(input.CWD) > 32768 {
+		return errors.New("hook input has an invalid cwd")
 	}
 	return nil
 }
@@ -335,8 +393,10 @@ func hookEventKey(input hookInput, jobID string) string {
 		input.SessionID,
 		input.TurnID,
 		input.HookEventName,
+		input.CWD,
 		input.ToolUseID,
 		jobID,
+		strconv.FormatBool(input.StopHookActive),
 	}, "\x00")
 	return identity.SHA256([]byte(value))
 }

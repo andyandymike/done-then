@@ -103,7 +103,7 @@ func statusCommand(args []string, streams IO, deps dependencies) int {
 	}
 	if len(pluginJobs) != 0 {
 		writer := tabwriter.NewWriter(streams.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(writer, "PLUGIN JOB ID\tSTATE\tMODE\tCANCEL\tHOST\tVERIFIER\tACTION\tEXPIRES\tSCHEDULED")
+		fmt.Fprintln(writer, "PLUGIN JOB ID\tSTATE\tTRIGGER\tMODE\tCANCEL\tHOST\tVERIFIER\tACTION\tEXPIRES\tSCHEDULED")
 		for _, job := range pluginJobs {
 			if job.State.IsActive() && job.Expired(timeNowUTC()) {
 				refreshed, refreshErr := pluginStore.RefreshExpiry(job.JobID)
@@ -121,9 +121,10 @@ func statusCommand(args []string, streams IO, deps dependencies) int {
 			if status.CancelRequested {
 				cancelState = "requested"
 			}
-			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				status.JobID,
 				status.State,
+				status.TriggerPolicy,
 				status.Mode,
 				cancelState,
 				status.HostSnapshots,

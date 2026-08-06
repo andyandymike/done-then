@@ -28,7 +28,7 @@ func TestServerNegotiatesListsToolsAndRejectsExecute(t *testing.T) {
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
-		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"arm","arguments":{"action":"shutdown","delay_seconds":120,"expires_in_seconds":3600,"mode":"execute","verifier_profile":"none","allow_agent_only_success":true}}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"arm","arguments":{"action":"shutdown","trigger_policy":"after_stop","acknowledge_stop_without_success":true,"delay_seconds":120,"expires_in_seconds":3600,"mode":"execute","verifier_profile":"none","allow_agent_only_success":false}}}`,
 	}, "\n")
 	var output bytes.Buffer
 	if err := server.Serve(context.Background(), strings.NewReader(input), &output); err != nil {

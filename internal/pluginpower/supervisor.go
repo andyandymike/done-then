@@ -44,9 +44,8 @@ type Supervisor struct {
 }
 
 func NewSupervisor(config SupervisorConfig) (*Supervisor, error) {
-	if config.Store == nil || config.Authority == nil || config.Backend == nil || config.Profiles == nil || config.AcquireLock == nil ||
-		config.PolicyFingerprint == "" || config.CurrentPolicyFingerprint == nil || config.UnresolvedPowerJobs == nil {
-		return nil, errors.New("plugin supervisor requires state, authority, profiles, backend, and power lock")
+	if config.Store == nil || config.Backend == nil || config.AcquireLock == nil || config.UnresolvedPowerJobs == nil {
+		return nil, errors.New("plugin supervisor requires state, backend, power lock, and power-job inventory")
 	}
 	if config.Now == nil {
 		config.Now = time.Now
@@ -105,6 +104,27 @@ func (s *Supervisor) Run(ctx context.Context, jobID string) error {
 		}
 		if job.State == pluginstate.StateActionScheduled {
 			return s.monitorScheduled(ctx, job)
+		}
+		if job.TriggerPolicy == pluginstate.TriggerAfterStop {
+			if job.Expired(s.config.Now().UTC()) {
+				return s.fail(job, pluginstate.StateExpired, "arm_expired")
+			}
+			if job.State == pluginstate.StateStopObserved {
+				if err := s.schedule(ctx, jobID); err != nil {
+					if errors.Is(err, errJobChanged) {
+						continue
+					}
+					return err
+				}
+				continue
+			}
+			if err := waitContext(ctx, s.config.PollInterval); err != nil {
+				return err
+			}
+			continue
+		}
+		if !s.verifiedConfigReady() {
+			return s.fail(job, pluginstate.StateHostUnavailable, "verified_success_supervisor_configuration_unavailable")
 		}
 		if !s.policyMatches(job) {
 			return s.fail(job, pluginstate.StatePrivilegeUnavailable, "power_policy_changed_after_arm")
@@ -282,23 +302,31 @@ func (s *Supervisor) schedule(ctx context.Context, jobID string) error {
 	if err != nil {
 		return err
 	}
-	if job.State != pluginstate.StateStopObserved || job.HookFingerprintH3 == "" ||
-		job.HookFingerprintH1 != job.HookFingerprintH2 || job.HookFingerprintH2 != job.HookFingerprintH3 {
+	if job.State != pluginstate.StateStopObserved {
 		return errJobChanged
 	}
-	if job.PowerPolicyFingerprint != s.config.PolicyFingerprint {
-		return s.fail(job, pluginstate.StatePrivilegeUnavailable, "power_policy_changed_before_action")
-	}
-	if !s.policyMatches(job) {
-		return s.fail(job, pluginstate.StatePrivilegeUnavailable, "power_policy_unavailable_before_action")
-	}
-	if job.VerifierProfile != "none" {
-		profile, profileErr := s.config.Profiles.Load(job.VerifierProfile)
-		if profileErr != nil || !job.VerifierPassed || profile.Fingerprint != job.VerifierFingerprint {
-			return s.fail(job, pluginstate.StateVerificationFailed, "verifier_profile_changed_before_action")
+	if job.TriggerPolicy == pluginstate.TriggerAfterStop {
+		if !job.StopWithoutSuccessAck || job.SessionID == "" || job.StopTurnID == "" || job.StopTurnID != job.CurrentTurnID {
+			return s.fail(job, pluginstate.StateHookUnavailable, "after_stop_binding_incomplete")
 		}
-	} else if !job.AllowAgentOnlySuccess {
-		return s.fail(job, pluginstate.StateVerificationFailed, "independent_evidence_required")
+	} else {
+		if job.HookFingerprintH3 == "" || job.HookFingerprintH1 != job.HookFingerprintH2 || job.HookFingerprintH2 != job.HookFingerprintH3 {
+			return errJobChanged
+		}
+		if job.PowerPolicyFingerprint != s.config.PolicyFingerprint {
+			return s.fail(job, pluginstate.StatePrivilegeUnavailable, "power_policy_changed_before_action")
+		}
+		if !s.policyMatches(job) {
+			return s.fail(job, pluginstate.StatePrivilegeUnavailable, "power_policy_unavailable_before_action")
+		}
+		if job.VerifierProfile != "none" {
+			profile, profileErr := s.config.Profiles.Load(job.VerifierProfile)
+			if profileErr != nil || !job.VerifierPassed || profile.Fingerprint != job.VerifierFingerprint {
+				return s.fail(job, pluginstate.StateVerificationFailed, "verifier_profile_changed_before_action")
+			}
+		} else if !job.AllowAgentOnlySuccess {
+			return s.fail(job, pluginstate.StateVerificationFailed, "independent_evidence_required")
+		}
 	}
 
 	if err := waitContext(ctx, s.config.Quiescence); err != nil {
@@ -311,28 +339,34 @@ func (s *Supervisor) schedule(ctx context.Context, jobID string) error {
 	if current.Generation != job.Generation || current.State != pluginstate.StateStopObserved {
 		return errJobChanged
 	}
-	finalSnapshot, err := s.config.Authority.Snapshot(ctx, current.SessionID, current.WorkspaceCWD)
-	if err != nil {
-		return s.fail(current, pluginstate.StateHostUnavailable, "final_host_snapshot_failed")
-	}
-	if state, reason, failed := classifySnapshot(finalSnapshot); failed {
-		return s.fail(current, state, reason)
-	}
-	if !finalSnapshot.ReadyForFinalGate(current.StopTurnID) || finalSnapshot.HookDecision.Fingerprint != current.HookFingerprintH3 ||
-		finalSnapshot.HostInstanceID != current.HostInstanceID {
-		return s.fail(current, pluginstate.StateInventoryPartial, "final_quiescence_gate_changed")
-	}
-	if !s.policyMatches(current) {
-		return s.fail(current, pluginstate.StatePrivilegeUnavailable, "power_policy_changed_at_final_gate")
+	if current.TriggerPolicy == pluginstate.TriggerVerifiedSuccess {
+		finalSnapshot, snapshotErr := s.config.Authority.Snapshot(ctx, current.SessionID, current.WorkspaceCWD)
+		if snapshotErr != nil {
+			return s.fail(current, pluginstate.StateHostUnavailable, "final_host_snapshot_failed")
+		}
+		if state, reason, failed := classifySnapshot(finalSnapshot); failed {
+			return s.fail(current, state, reason)
+		}
+		if !finalSnapshot.ReadyForFinalGate(current.StopTurnID) || finalSnapshot.HookDecision.Fingerprint != current.HookFingerprintH3 ||
+			finalSnapshot.HostInstanceID != current.HostInstanceID {
+			return s.fail(current, pluginstate.StateInventoryPartial, "final_quiescence_gate_changed")
+		}
+		if !s.policyMatches(current) {
+			return s.fail(current, pluginstate.StatePrivilegeUnavailable, "power_policy_changed_at_final_gate")
+		}
 	}
 
 	now := s.config.Now().UTC()
 	delay := time.Duration(current.DelaySeconds) * time.Second
+	comment := fmt.Sprintf("DoneThen plugin job %.20s completed", current.JobID)
+	if current.TriggerPolicy == pluginstate.TriggerAfterStop {
+		comment = fmt.Sprintf("DoneThen job %.20s: Codex stopped", current.JobID)
+	}
 	request := actions.PowerRequest{
 		JobID:       current.JobID,
 		Action:      current.Action,
 		Delay:       delay,
-		Comment:     fmt.Sprintf("DoneThen plugin job %.20s completed", current.JobID),
+		Comment:     comment,
 		RequestedAt: now,
 	}
 	capabilities, err := s.config.Backend.Preflight(ctx, request)
@@ -466,7 +500,7 @@ func (s *Supervisor) monitorScheduled(ctx context.Context, scheduled pluginstate
 			}
 			reason = "countdown_deadline_missed_after_sleep_or_stall"
 		}
-		if !current.CancelRequested && reason == "" {
+		if !current.CancelRequested && reason == "" && current.TriggerPolicy == pluginstate.TriggerVerifiedSuccess {
 			if !s.policyMatches(current) {
 				reason = "power_policy_changed_during_countdown"
 			} else if current.VerifierProfile != "none" {
@@ -476,7 +510,7 @@ func (s *Supervisor) monitorScheduled(ctx context.Context, scheduled pluginstate
 				}
 			}
 		}
-		if !current.CancelRequested && reason == "" {
+		if !current.CancelRequested && reason == "" && current.TriggerPolicy == pluginstate.TriggerVerifiedSuccess {
 			snapshot, snapshotErr := s.config.Authority.Snapshot(ctx, current.SessionID, current.WorkspaceCWD)
 			if snapshotErr != nil {
 				reason = "host_unavailable_during_countdown"
@@ -521,11 +555,16 @@ func (s *Supervisor) monitorScheduled(ctx context.Context, scheduled pluginstate
 }
 
 func (s *Supervisor) policyMatches(job pluginstate.Job) bool {
-	if job.PowerPolicyFingerprint == "" || job.PowerPolicyFingerprint != s.config.PolicyFingerprint {
+	if s.config.CurrentPolicyFingerprint == nil || job.PowerPolicyFingerprint == "" || job.PowerPolicyFingerprint != s.config.PolicyFingerprint {
 		return false
 	}
 	current, err := s.config.CurrentPolicyFingerprint()
 	return err == nil && current == job.PowerPolicyFingerprint
+}
+
+func (s *Supervisor) verifiedConfigReady() bool {
+	return s.config.Authority != nil && s.config.Profiles != nil && s.config.PolicyFingerprint != "" &&
+		s.config.CurrentPolicyFingerprint != nil
 }
 
 func (s *Supervisor) cancelPowerForReason(ctx context.Context, job pluginstate.Job, receipt actions.Receipt, reason string) error {

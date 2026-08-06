@@ -284,8 +284,8 @@ exit 0
 
     $mcpPath = Join-Path $stagePlugin '.mcp.json'
     $mcp = Get-Content -LiteralPath $mcpPath -Raw | ConvertFrom-Json
-    $mcp.mcpServers.done_then.command = 'powershell.exe'
-    $mcp.mcpServers.done_then.args = @(
+    $mcp.done_then.command = 'powershell.exe'
+    $mcp.done_then.args = @(
         '-NoLogo',
         '-NoProfile',
         '-NonInteractive',

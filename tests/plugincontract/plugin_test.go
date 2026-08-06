@@ -70,22 +70,20 @@ func TestPluginMCPLaunchesDoneThenWithoutShellArguments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var document struct {
-		Servers map[string]struct {
-			Command string   `json:"command"`
-			Args    []string `json:"args"`
-		} `json:"mcpServers"`
+	var servers map[string]struct {
+		Command string   `json:"command"`
+		Args    []string `json:"args"`
 	}
-	if err := json.Unmarshal(data, &document); err != nil {
+	if err := json.Unmarshal(data, &servers); err != nil {
 		t.Fatal(err)
 	}
-	server, ok := document.Servers["done_then"]
+	server, ok := servers["done_then"]
 	if !ok || server.Command != "donethen" || len(server.Args) != 1 || server.Args[0] != "mcp" {
 		t.Fatalf("done_then server = %#v", server)
 	}
 }
 
-func TestPluginRuntimeCannotReachPowerBackend(t *testing.T) {
+func TestPluginObserversCannotSchedulePowerDirectly(t *testing.T) {
 	root := repositoryRoot(t)
 	for _, directory := range []string{"pluginapi", "pluginstate", "mcpserver", "hookobserver"} {
 		entries, err := os.ReadDir(filepath.Join(root, "internal", directory))
@@ -102,7 +100,7 @@ func TestPluginRuntimeCannotReachPowerBackend(t *testing.T) {
 				t.Fatal(err)
 			}
 			text := string(data)
-			if strings.Contains(text, "/internal/actions") || strings.Contains(strings.ToLower(text), "shutdown.exe") {
+			if strings.Contains(text, ".Schedule(") || strings.Contains(strings.ToLower(text), "shutdown.exe") {
 				t.Fatalf("plugin runtime crossed the power-backend boundary in %s", path)
 			}
 		}

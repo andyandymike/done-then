@@ -15,10 +15,11 @@ type Platform struct {
 }
 
 type Manifest struct {
-	SchemaVersion        int                 `json:"schema_version"`
-	Updated              string              `json:"updated"`
-	PluginExecuteDefault string              `json:"plugin_execute_default"`
-	Platforms            map[string]Platform `json:"platforms"`
+	SchemaVersion                 int                 `json:"schema_version"`
+	Updated                       string              `json:"updated"`
+	PluginExecuteDefault          string              `json:"plugin_execute_default"`
+	VerifiedSuccessExecuteDefault string              `json:"verified_success_execute_default"`
+	Platforms                     map[string]Platform `json:"platforms"`
 }
 
 func Load() (Manifest, error) {
@@ -26,7 +27,8 @@ func Load() (Manifest, error) {
 	if err := json.Unmarshal(manifestData, &manifest); err != nil {
 		return Manifest{}, fmt.Errorf("decode embedded capability manifest: %w", err)
 	}
-	if manifest.SchemaVersion != 1 || manifest.PluginExecuteDefault != "disabled" || len(manifest.Platforms) == 0 {
+	if manifest.SchemaVersion != 1 || manifest.PluginExecuteDefault != "after_stop_on_supported_platforms" ||
+		manifest.VerifiedSuccessExecuteDefault != "disabled" || len(manifest.Platforms) == 0 {
 		return Manifest{}, fmt.Errorf("embedded capability manifest is invalid")
 	}
 	return manifest, nil

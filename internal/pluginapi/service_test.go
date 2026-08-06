@@ -36,7 +36,8 @@ func TestExecuteArmFailsClosedWithoutCreatingJob(t *testing.T) {
 	}
 	result := service.Call(context.Background(), "arm", json.RawMessage(`{
 		"action":"shutdown","delay_seconds":120,"expires_in_seconds":3600,
-		"mode":"execute","verifier_profile":"none","allow_agent_only_success":true
+		"trigger_policy":"after_stop","acknowledge_stop_without_success":true,
+		"mode":"execute","verifier_profile":"none","allow_agent_only_success":false
 	}`))
 	if !result.IsError || result.Structured["reason_code"] != "execute_unavailable" {
 		t.Fatalf("execute arm result = %#v", result)
@@ -69,6 +70,7 @@ func TestExecuteArmRequiresTwoMinuteCancellationWindow(t *testing.T) {
 	}
 	result := service.Call(context.Background(), "arm", json.RawMessage(`{
 		"action":"shutdown","delay_seconds":119,"expires_in_seconds":3600,
+		"trigger_policy":"verified_success","acknowledge_stop_without_success":false,
 		"mode":"execute","verifier_profile":"none","allow_agent_only_success":true
 	}`))
 	if !result.IsError || result.Structured["reason_code"] != "invalid_delay" {
@@ -77,6 +79,54 @@ func TestExecuteArmRequiresTwoMinuteCancellationWindow(t *testing.T) {
 	j, err := state.List()
 	if err != nil || len(j) != 0 {
 		t.Fatalf("short execute arm created jobs: %#v, %v", j, err)
+	}
+}
+
+func TestAfterStopExecuteRequiresAcknowledgementAndOnlyPreflightsAtArm(t *testing.T) {
+	root := t.TempDir()
+	state, err := pluginstate.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher := &fakeLauncher{}
+	backend := &actions.FakeBackend{}
+	service, err := NewWithOptions(state, Options{
+		AfterStopExecuteAvailable: true,
+		Workspace:                 root,
+		Launcher:                  launcher,
+		Backend:                   backend,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected := service.Call(context.Background(), "arm", json.RawMessage(`{
+		"action":"shutdown","trigger_policy":"after_stop","acknowledge_stop_without_success":false,
+		"delay_seconds":120,"expires_in_seconds":3600,"mode":"execute",
+		"verifier_profile":"none","allow_agent_only_success":false
+	}`))
+	if !rejected.IsError || rejected.Structured["reason_code"] != "stop_without_success_acknowledgement_required" {
+		t.Fatalf("unacknowledged after-stop arm = %#v", rejected)
+	}
+	armed := service.Call(context.Background(), "arm", json.RawMessage(`{
+		"action":"shutdown","trigger_policy":"after_stop","acknowledge_stop_without_success":true,
+		"delay_seconds":120,"expires_in_seconds":3600,"mode":"execute",
+		"verifier_profile":"none","allow_agent_only_success":false
+	}`))
+	if armed.IsError {
+		t.Fatalf("acknowledged after-stop arm = %#v", armed)
+	}
+	jobID := armed.Structured["job_id"].(string)
+	job, err := state.Load(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.TriggerPolicy != pluginstate.TriggerAfterStop || !job.StopWithoutSuccessAck ||
+		job.PowerPolicyFingerprint != "" || launcher.jobID != jobID {
+		t.Fatalf("after-stop job = %#v; launcher=%q", job, launcher.jobID)
+	}
+	scheduleCalls, _, _, _ := backend.Snapshot()
+	if backend.PreflightCalls != 1 || scheduleCalls != 0 {
+		t.Fatalf("arm backend calls: preflight=%d schedule=%d", backend.PreflightCalls, scheduleCalls)
 	}
 }
 
@@ -91,6 +141,7 @@ func TestArmExpiryCannotExceedOneDay(t *testing.T) {
 	}
 	result := service.Call(context.Background(), "arm", json.RawMessage(`{
 		"action":"shutdown","delay_seconds":120,"expires_in_seconds":86401,
+		"trigger_policy":"after_stop","acknowledge_stop_without_success":false,
 		"mode":"dry_run","verifier_profile":"none","allow_agent_only_success":false
 	}`))
 	if !result.IsError || result.Structured["reason_code"] != "invalid_expiry" {
@@ -109,10 +160,11 @@ func TestFinishRejectsNonDoneCompletionAndKeepsPowerUnavailable(t *testing.T) {
 	}
 	arm := service.Call(context.Background(), "arm", json.RawMessage(`{
 		"action":"shutdown","delay_seconds":120,"expires_in_seconds":3600,
+		"trigger_policy":"verified_success","acknowledge_stop_without_success":false,
 		"mode":"dry_run","verifier_profile":"none","allow_agent_only_success":false
 	}`))
 	jobID := arm.Structured["job_id"].(string)
-	if _, _, err := state.BindSession(jobID, "session", "turn", eventKeyForTest("a")); err != nil {
+	if _, _, err := state.BindSession(jobID, "session", "turn", "", eventKeyForTest("a")); err != nil {
 		t.Fatal(err)
 	}
 	finish := service.Call(context.Background(), "finish", json.RawMessage(`{
@@ -142,10 +194,11 @@ func TestFinishRequiresVerifierOrExplicitAgentOnlyBoundary(t *testing.T) {
 	}
 	arm := service.Call(context.Background(), "arm", json.RawMessage(`{
 		"action":"shutdown","delay_seconds":120,"expires_in_seconds":3600,
+		"trigger_policy":"verified_success","acknowledge_stop_without_success":false,
 		"mode":"dry_run","verifier_profile":"none","allow_agent_only_success":false
 	}`))
 	jobID := arm.Structured["job_id"].(string)
-	if _, _, err := state.BindSession(jobID, "session", "turn", eventKeyForTest("b")); err != nil {
+	if _, _, err := state.BindSession(jobID, "session", "turn", "", eventKeyForTest("b")); err != nil {
 		t.Fatal(err)
 	}
 	finish := service.Call(context.Background(), "finish", json.RawMessage(`{
@@ -183,6 +236,7 @@ func TestExecuteArmStartsOneShotSupervisorWithoutSchedulingPower(t *testing.T) {
 	}
 	result := service.Call(context.Background(), "arm", json.RawMessage(`{
 		"action":"shutdown","delay_seconds":120,"expires_in_seconds":3600,
+		"trigger_policy":"verified_success","acknowledge_stop_without_success":false,
 		"mode":"execute","verifier_profile":"none","allow_agent_only_success":true
 	}`))
 	if result.IsError || result.Structured["execute_available"] != true {
@@ -223,7 +277,8 @@ func TestCancelPersistsIntentUntilInFlightSchedulerSettles(t *testing.T) {
 	job := pluginstate.Job{
 		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
 		State: pluginstate.StateActionIntent, ReasonCode: "action_intent_recorded", Action: "shutdown", DelaySeconds: 120,
-		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, SessionID: "thread", ArmTurnID: "turn",
+		TriggerPolicy: pluginstate.TriggerVerifiedSuccess,
+		ExpiresAt:     now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, SessionID: "thread", ArmTurnID: "turn",
 		Generation: 2, VerifierProfile: "none", AllowAgentOnlySuccess: true, HookCompatibility: "compatible",
 		ArmObserved: true, WorkspaceCWD: root, PowerPolicyFingerprint: "sha256:policy", ActionIntentAt: &now,
 		ScheduledFor: &deadline, PowerCapabilities: &capabilities, PowerReceipt: &receipt,
@@ -294,13 +349,14 @@ func TestFinishRunsFixedRegisteredVerifierBeforeReadyState(t *testing.T) {
 	}
 	arm := service.Call(context.Background(), "arm", json.RawMessage(`{
 		"action":"shutdown","delay_seconds":120,"expires_in_seconds":3600,
+		"trigger_policy":"verified_success","acknowledge_stop_without_success":false,
 		"mode":"execute","verifier_profile":"tests","allow_agent_only_success":false
 	}`))
 	if arm.IsError {
 		t.Fatalf("arm = %#v", arm)
 	}
 	jobID := arm.Structured["job_id"].(string)
-	if _, _, err := state.BindSession(jobID, "thread", "turn", eventKeyForTest("v")); err != nil {
+	if _, _, err := state.BindSession(jobID, "thread", "turn", root, eventKeyForTest("v")); err != nil {
 		t.Fatal(err)
 	}
 	finish := service.Call(context.Background(), "finish", json.RawMessage(`{

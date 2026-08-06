@@ -28,41 +28,18 @@ func superviseCommand(ctx context.Context, args []string, streams IO, deps depen
 	if err != nil {
 		return runtimeError(streams.Stderr, supervisor.ExitStateError, "initialize plugin state", err)
 	}
-	policy, err := powerpolicy.Load(root)
+	job, err := state.Load(args[0])
 	if err != nil {
-		return runtimeError(streams.Stderr, supervisor.ExitStateError, "load local power policy", err)
-	}
-	profiles, err := verifierprofile.New(root)
-	if err != nil {
-		return runtimeError(streams.Stderr, supervisor.ExitStateError, "initialize verifier registry", err)
+		return runtimeError(streams.Stderr, supervisor.ExitStateError, "load plugin job", err)
 	}
 	classicState, err := store.New(root)
 	if err != nil {
 		return runtimeError(streams.Stderr, supervisor.ExitStateError, "initialize power job inventory", err)
 	}
-	proxy, err := hostauthority.StartProxyWithArgs(ctx, policy.CodexExecutable, policy.CodexPrefixArgs, Version, streams.Stderr)
-	if err != nil {
-		return runtimeError(streams.Stderr, supervisor.ExitStateError, "connect Codex host authority", err)
-	}
-	defer proxy.Close()
-	adapter, err := hostauthority.NewAdapter(proxy.Client(), policy.ExpectedPluginID, policy.ExpectedHookHashes)
-	if err != nil {
-		return runtimeError(streams.Stderr, supervisor.ExitStateError, "initialize Codex host authority", err)
-	}
-	worker, err := pluginpower.NewSupervisor(pluginpower.SupervisorConfig{
-		Store:             state,
-		Authority:         adapter,
-		Backend:           deps.newActionBackend(),
-		Profiles:          profiles,
-		AcquireLock:       deps.acquirePowerLock,
-		PolicyFingerprint: policy.Fingerprint,
-		CurrentPolicyFingerprint: func() (string, error) {
-			current, loadErr := powerpolicy.Load(root)
-			if loadErr != nil {
-				return "", loadErr
-			}
-			return current.Fingerprint, nil
-		},
+	config := pluginpower.SupervisorConfig{
+		Store:       state,
+		Backend:     deps.newActionBackend(),
+		AcquireLock: deps.acquirePowerLock,
 		UnresolvedPowerJobs: func(currentJobID string) ([]string, error) {
 			ids := make([]string, 0)
 			classicJobs, listErr := classicState.ActivePowerJobs()
@@ -83,7 +60,37 @@ func superviseCommand(ctx context.Context, args []string, streams IO, deps depen
 			}
 			return ids, nil
 		},
-	})
+	}
+	if job.TriggerPolicy == pluginstate.TriggerVerifiedSuccess {
+		policy, loadErr := powerpolicy.Load(root)
+		if loadErr != nil {
+			return runtimeError(streams.Stderr, supervisor.ExitStateError, "load local power policy", loadErr)
+		}
+		profiles, profilesErr := verifierprofile.New(root)
+		if profilesErr != nil {
+			return runtimeError(streams.Stderr, supervisor.ExitStateError, "initialize verifier registry", profilesErr)
+		}
+		proxy, proxyErr := hostauthority.StartProxyWithArgs(ctx, policy.CodexExecutable, policy.CodexPrefixArgs, Version, streams.Stderr)
+		if proxyErr != nil {
+			return runtimeError(streams.Stderr, supervisor.ExitStateError, "connect Codex host authority", proxyErr)
+		}
+		defer proxy.Close()
+		adapter, adapterErr := hostauthority.NewAdapter(proxy.Client(), policy.ExpectedPluginID, policy.ExpectedHookHashes)
+		if adapterErr != nil {
+			return runtimeError(streams.Stderr, supervisor.ExitStateError, "initialize Codex host authority", adapterErr)
+		}
+		config.Authority = adapter
+		config.Profiles = profiles
+		config.PolicyFingerprint = policy.Fingerprint
+		config.CurrentPolicyFingerprint = func() (string, error) {
+			current, currentErr := powerpolicy.Load(root)
+			if currentErr != nil {
+				return "", currentErr
+			}
+			return current.Fingerprint, nil
+		}
+	}
+	worker, err := pluginpower.NewSupervisor(config)
 	if err != nil {
 		return runtimeError(streams.Stderr, supervisor.ExitStateError, "initialize one-shot supervisor", err)
 	}

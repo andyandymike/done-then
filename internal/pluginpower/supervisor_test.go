@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,6 +64,65 @@ func TestSupervisorSchedulesOnlyAfterStableReadyHostSnapshots(t *testing.T) {
 	scheduleCalls, cancelCalls, delay, _ := backend.Snapshot()
 	if scheduleCalls != 1 || cancelCalls != 0 || delay != 2*time.Minute {
 		t.Fatalf("backend schedule=%d cancel=%d delay=%s", scheduleCalls, cancelCalls, delay)
+	}
+}
+
+func TestAfterStopSupervisorSchedulesWithoutAppServerOrCompletionEvidence(t *testing.T) {
+	root := t.TempDir()
+	state, err := pluginstate.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseNow := time.Now().UTC()
+	job := pluginstate.Job{
+		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
+		State: pluginstate.StateStopObserved, ReasonCode: "after_stop_observed_awaiting_countdown",
+		Action: "shutdown", TriggerPolicy: pluginstate.TriggerAfterStop, StopWithoutSuccessAck: true,
+		DelaySeconds: 120, ExpiresAt: baseNow.Add(time.Hour), CreatedAt: baseNow, UpdatedAt: baseNow,
+		SessionID: "thread-after-stop", ArmTurnID: "turn-1", CurrentTurnID: "turn-1", StopTurnID: "turn-1",
+		Generation: 1, VerifierProfile: "none", HookCompatibility: "session_bound", ArmObserved: true,
+		WorkspaceCWD: filepath.Clean(root), SupervisorPID: 4242,
+	}
+	if err := state.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	backend := &actions.FakeBackend{}
+	worker, err := NewSupervisor(SupervisorConfig{
+		Store: state, Backend: backend,
+		AcquireLock:         func() (platform.PowerLock, error) { return fakeLock{}, nil },
+		UnresolvedPowerJobs: func(string) ([]string, error) { return nil, nil },
+		PollInterval:        time.Millisecond,
+		Quiescence:          time.Millisecond,
+		ProcessID:           4242,
+		Now: func() time.Time {
+			scheduleCalls, _, _, _ := backend.Snapshot()
+			if scheduleCalls > 0 {
+				return baseNow.Add(2*time.Minute + time.Second)
+			}
+			return baseNow
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Run(context.Background(), job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != pluginstate.StateActionScheduled || updated.PowerReceipt == nil ||
+		updated.CompletionEvidenceHash != "" || updated.HostInstanceID != "" {
+		t.Fatalf("after-stop scheduled job = %#v", updated)
+	}
+	scheduleCalls, cancelCalls, delay, comment := backend.Snapshot()
+	if scheduleCalls != 1 || cancelCalls != 0 || delay != 2*time.Minute || !strings.Contains(comment, "Codex stopped") {
+		t.Fatalf("backend schedule=%d cancel=%d delay=%s comment=%q", scheduleCalls, cancelCalls, delay, comment)
 	}
 }
 
@@ -363,6 +423,7 @@ func stoppedExecuteJob(t *testing.T, root string) (*pluginstate.Store, pluginsta
 		ReasonCode:             "test_ready",
 		DryRun:                 false,
 		Action:                 "shutdown",
+		TriggerPolicy:          pluginstate.TriggerVerifiedSuccess,
 		DelaySeconds:           120,
 		ExpiresAt:              now.Add(time.Hour),
 		CreatedAt:              now,

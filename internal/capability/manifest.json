@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "updated": "2026-07-31",
-  "plugin_execute_default": "disabled",
+  "updated": "2026-08-06",
+  "plugin_execute_default": "after_stop_on_supported_platforms",
+  "verified_success_execute_default": "disabled",
   "platforms": {
     "windows-amd64": {
       "level": "C2",
-      "statement": "preview; real backend code is present but real cancel and poweroff acceptance are pending"
+      "statement": "preview; after-stop plugin path and real backend code are present, but real cancel and poweroff acceptance are pending"
     },
     "windows-arm64": {
       "level": "C1",

@@ -1,5 +1,5 @@
 title: DoneThen
-description: Open-source Windows safety for shutting down your PC only after a Codex task is genuinely complete.
+description: Open-source cancellable shutdown automation that starts when an armed Codex turn stops.
 url: https://andyandymike.github.io
 baseurl: /done-then
 lang: en

@@ -63,21 +63,19 @@ func TestDevelopmentInstallStagesAndUninstallsOnlyOwnedMarketplace(t *testing.T)
 	}
 	readJSONFile(t, filepath.Join(fixture, ".codex-plugin", "plugin.json"), &sourceManifest)
 	readJSONFile(t, filepath.Join(stagePlugin, ".codex-plugin", "plugin.json"), &stagedManifest)
-	if sourceManifest.Version != "0.1.0" {
+	if sourceManifest.Version != "0.2.0" {
 		t.Fatalf("source manifest version changed to %q", sourceManifest.Version)
 	}
-	if !strings.HasPrefix(stagedManifest.Version, "0.1.0+codex.local.") {
+	if !strings.HasPrefix(stagedManifest.Version, "0.2.0+codex.local.") {
 		t.Fatalf("staged cachebuster version = %q", stagedManifest.Version)
 	}
 
-	var mcp struct {
-		Servers map[string]struct {
-			Command string   `json:"command"`
-			Args    []string `json:"args"`
-		} `json:"mcpServers"`
+	var mcp map[string]struct {
+		Command string   `json:"command"`
+		Args    []string `json:"args"`
 	}
 	readJSONFile(t, filepath.Join(stagePlugin, ".mcp.json"), &mcp)
-	server := mcp.Servers["done_then"]
+	server := mcp["done_then"]
 	launcherPath := ""
 	for _, argument := range server.Args {
 		base := filepath.Base(argument)
@@ -214,23 +212,24 @@ func TestLiveSmokeVerifiesObserveOnlyLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := map[string]any{
-		"schema_version":           "1",
-		"job_id":                   jobID,
-		"state":                    "STOP_OBSERVED",
-		"reason_code":              "matching_stop_observed_no_action",
-		"dry_run":                  true,
-		"action":                   "shutdown",
-		"allow_agent_only_success": true,
-		"hook_compatibility":       "not_evaluated",
-		"arm_observed":             true,
-		"finish_observed":          true,
-		"completion_status":        "done",
-		"completion_evidence_hash": strings.Repeat("d", 64),
-		"stop_turn_id":             "turn-smoke",
+		"schema_version":                    "3",
+		"job_id":                            jobID,
+		"state":                             "DRY_RUN_COMPLETE",
+		"reason_code":                       "after_stop_observed_no_action",
+		"dry_run":                           true,
+		"action":                            "shutdown",
+		"trigger_policy":                    "after_stop",
+		"stop_without_success_acknowledged": false,
+		"verifier_profile":                  "none",
+		"allow_agent_only_success":          false,
+		"hook_compatibility":                "session_bound",
+		"arm_observed":                      true,
+		"finish_observed":                   false,
+		"stop_turn_id":                      "turn-smoke",
 	}
 	writeJSONFile(t, filepath.Join(jobDirectory, jobID+".json"), job)
 
-	eventNames := []string{"mcp.arm", "hook.post_tool.arm", "mcp.finish", "hook.post_tool.finish", "hook.stop"}
+	eventNames := []string{"mcp.arm", "hook.post_tool.arm", "hook.stop"}
 	var lines []string
 	for index, name := range eventNames {
 		event := map[string]any{
@@ -240,8 +239,8 @@ func TestLiveSmokeVerifiesObserveOnlyLifecycle(t *testing.T) {
 			"name":           name,
 			"event_key":      strings.Repeat("a", 64),
 			"old_state":      "ARMED",
-			"new_state":      "STOP_OBSERVED",
-			"reason_code":    "matching_stop_observed_no_action",
+			"new_state":      "DRY_RUN_COMPLETE",
+			"reason_code":    "after_stop_observed_no_action",
 			"generation":     index + 1,
 			"session_hash":   strings.Repeat("b", 64),
 			"turn_hash":      strings.Repeat("c", 64),

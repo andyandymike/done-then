@@ -27,12 +27,14 @@ type doctorCheck struct {
 }
 
 type doctorReport struct {
-	Version             string        `json:"version"`
-	Platform            string        `json:"platform"`
-	CapabilityLevel     string        `json:"capability_level"`
-	CapabilityStatement string        `json:"capability_statement"`
-	ExecuteAvailable    bool          `json:"execute_available"`
-	Checks              []doctorCheck `json:"checks"`
+	Version                         string        `json:"version"`
+	Platform                        string        `json:"platform"`
+	CapabilityLevel                 string        `json:"capability_level"`
+	CapabilityStatement             string        `json:"capability_statement"`
+	ExecuteAvailable                bool          `json:"execute_available"`
+	AfterStopExecuteAvailable       bool          `json:"after_stop_execute_available"`
+	VerifiedSuccessExecuteAvailable bool          `json:"verified_success_execute_available"`
+	Checks                          []doctorCheck `json:"checks"`
 }
 
 func doctorCommand(ctx context.Context, args []string, streams IO, deps dependencies) int {
@@ -90,11 +92,13 @@ func doctorCommand(ctx context.Context, args []string, streams IO, deps dependen
 		report.Checks = append(report.Checks, doctorCheck{"power_backend", "WARN", boundedDoctorDetail(detail)})
 	} else {
 		report.Checks = append(report.Checks, doctorCheck{"power_backend", "PASS", fmt.Sprintf("%s; cancel scope=%s", capabilities.BackendID, capabilities.CancelScope)})
+		report.AfterStopExecuteAvailable = true
+		report.ExecuteAvailable = true
 	}
 
 	policy, policyErr := powerpolicy.Load(root)
 	if policyErr != nil {
-		report.Checks = append(report.Checks, doctorCheck{"power_policy", "WARN", "plugin execute remains disabled; local power policy is absent or invalid"})
+		report.Checks = append(report.Checks, doctorCheck{"power_policy", "INFO", "verified-success execute is unavailable; after-stop does not require this policy"})
 	} else {
 		report.Checks = append(report.Checks, doctorCheck{"power_policy", "PASS", "owner-controlled policy fingerprint " + shortFingerprint(policy.Fingerprint)})
 		cwd, cwdErr := os.Getwd()
@@ -104,7 +108,7 @@ func doctorCommand(ctx context.Context, args []string, streams IO, deps dependen
 			report.Checks = append(report.Checks, check)
 		} else {
 			report.Checks = append(report.Checks, check)
-			report.ExecuteAvailable = backendErr == nil && capabilities.ExecuteSupported && profiles != nil
+			report.VerifiedSuccessExecuteAvailable = backendErr == nil && capabilities.ExecuteSupported && profiles != nil
 		}
 	}
 	report.Checks = append(report.Checks,
@@ -154,7 +158,8 @@ func writeDoctorReport(report doctorReport, jsonOutput bool, streams IO) int {
 		fmt.Fprintf(writer, "%s\t%s\t%s\n", check.Name, check.Status, check.Detail)
 	}
 	_ = writer.Flush()
-	fmt.Fprintf(streams.Stdout, "Plugin execute available now: %t\n", report.ExecuteAvailable)
+	fmt.Fprintf(streams.Stdout, "After-stop execute available now: %t\n", report.AfterStopExecuteAvailable)
+	fmt.Fprintf(streams.Stdout, "Verified-success execute available now: %t\n", report.VerifiedSuccessExecuteAvailable)
 	return 0
 }
 

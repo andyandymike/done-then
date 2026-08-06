@@ -400,7 +400,7 @@ $plan = [ordered]@{
     invokes_shutdown     = $false
     installs_plugin      = $false
     changes_hook_trust   = $false
-    verify_requires      = @('unchanged configuration hashes', 'unchanged installed runtime hash', 'dry_run job', 'STOP_OBSERVED state', 'complete MCP/Hook event subsequence', 'redacted event schema')
+    verify_requires      = @('unchanged configuration hashes', 'unchanged installed runtime hash', 'after_stop dry_run job', 'DRY_RUN_COMPLETE state', 'arm/bind/Stop event subsequence', 'redacted event schema')
 }
 
 if ($Action -eq 'Plan') {
@@ -544,18 +544,20 @@ if (Test-Path -LiteralPath $eventPath -PathType Leaf) {
 
 if ($null -ne $job) {
     $jobChecks = [ordered]@{
-        schema_version           = [string]$job.schema_version -eq '1'
+        schema_version           = [string]$job.schema_version -eq '3'
         identity                 = [string]$job.job_id -eq $JobId
-        state                    = [string]$job.state -eq 'STOP_OBSERVED'
-        reason                   = [string]$job.reason_code -eq 'matching_stop_observed_no_action'
+        state                    = [string]$job.state -eq 'DRY_RUN_COMPLETE'
+        reason                   = [string]$job.reason_code -eq 'after_stop_observed_no_action'
         dry_run                  = [bool]$job.dry_run
         shutdown_intent          = [string]$job.action -eq 'shutdown'
-        agent_only_opt_in        = [bool]$job.allow_agent_only_success
-        hook_compatibility       = [string]$job.hook_compatibility -eq 'not_evaluated'
+        trigger_policy           = [string]$job.trigger_policy -eq 'after_stop'
+        stop_without_success_ack = -not [bool]$job.stop_without_success_acknowledged
+        semantic_verifier_absent = [string]$job.verifier_profile -eq 'none' -and -not [bool]$job.allow_agent_only_success
+        hook_compatibility       = [string]$job.hook_compatibility -eq 'session_bound'
         arm_observed             = [bool]$job.arm_observed
-        finish_observed          = [bool]$job.finish_observed
-        completion_status        = [string]$job.completion_status -eq 'done'
-        completion_evidence_hash = [string]$job.completion_evidence_hash -match '^[0-9a-f]{64}$'
+        finish_not_observed      = -not [bool]$job.finish_observed
+        no_completion_status     = [string]::IsNullOrWhiteSpace([string]$job.completion_status)
+        no_completion_evidence   = [string]::IsNullOrWhiteSpace([string]$job.completion_evidence_hash)
         stop_turn_bound          = -not [string]::IsNullOrWhiteSpace([string]$job.stop_turn_id)
     }
     foreach ($check in $jobChecks.GetEnumerator()) {
@@ -601,7 +603,7 @@ if ($powerActionEventCount -ne 0) {
     $failures.Add('plugin event log contains a power-action event') | Out-Null
 }
 
-$expectedSequence = @('mcp.arm', 'hook.post_tool.arm', 'mcp.finish', 'hook.post_tool.finish', 'hook.stop')
+$expectedSequence = @('mcp.arm', 'hook.post_tool.arm', 'hook.stop')
 $sequencePosition = 0
 foreach ($event in $events) {
     if ($sequencePosition -lt $expectedSequence.Count -and [string]$event.name -eq $expectedSequence[$sequencePosition]) {
@@ -625,7 +627,7 @@ $report = [ordered]@{
     event_count                = $events.Count
     event_sequence_observed    = $eventSequenceObserved
     power_action_event_count   = $powerActionEventCount
-    execute_available_expected = $false
+    after_stop_execute_available_expected = $true
     failures                   = @($failures)
 }
 ConvertTo-StableJson -Value $report

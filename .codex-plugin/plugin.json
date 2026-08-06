@@ -1,7 +1,7 @@
 {
   "name": "done-then",
-  "version": "0.1.0",
-  "description": "Verify Codex task completion before an optional, cancellable post-task action.",
+  "version": "0.2.0",
+  "description": "Start a cancellable shutdown countdown when the current Codex turn stops.",
   "author": {
     "name": "andyandymike",
     "url": "https://github.com/andyandymike"
@@ -19,8 +19,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Done Then",
-    "shortDescription": "Safe post-task action intent for Codex",
-    "longDescription": "Arm a time-limited grant, verify structured completion with host and optional independent evidence, and schedule a cancellable post-task action without replacing existing hooks.",
+    "shortDescription": "Shut down after Codex stops",
+    "longDescription": "Arm a session-bound, time-limited grant that starts a cancellable shutdown countdown when the current Codex turn stops. Stop is an observable lifecycle event, not a claim that the task succeeded. A separate experimental verified-success mode remains available for development.",
     "developerName": "andyandymike",
     "category": "Productivity",
     "capabilities": [
@@ -29,9 +29,10 @@
     ],
     "websiteURL": "https://github.com/andyandymike/done-then",
     "defaultPrompt": [
-      "Use Done Then in dry-run mode for this task and report whether every safety gate is observed.",
+      "Shut down this computer two minutes after this turn stops; I understand Stop may not mean the task succeeded.",
+      "Dry-run Done Then for this turn and report the observed Stop state.",
       "Show the current Done Then job status without taking a power action."
     ],
-    "brandColor": "#2563EB"
+    "brandColor": "#9AD8B4"
   }
 }

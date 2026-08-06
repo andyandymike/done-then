@@ -11,9 +11,10 @@ import (
 )
 
 type manifest struct {
-	SchemaVersion        int                           `json:"schema_version"`
-	PluginExecuteDefault string                        `json:"plugin_execute_default"`
-	Platforms            map[string]platformCapability `json:"platforms"`
+	SchemaVersion                 int                           `json:"schema_version"`
+	PluginExecuteDefault          string                        `json:"plugin_execute_default"`
+	VerifiedSuccessExecuteDefault string                        `json:"verified_success_execute_default"`
+	Platforms                     map[string]platformCapability `json:"platforms"`
 }
 
 type platformCapability struct {
@@ -37,7 +38,8 @@ func TestPublicClaimsDoNotExceedManifest(t *testing.T) {
 	if err := json.Unmarshal(payload, &current); err != nil {
 		t.Fatal(err)
 	}
-	if current.SchemaVersion != 1 || current.PluginExecuteDefault != "disabled" {
+	if current.SchemaVersion != 1 || current.PluginExecuteDefault != "after_stop_on_supported_platforms" ||
+		current.VerifiedSuccessExecuteDefault != "disabled" {
 		t.Fatalf("unexpected capability safety defaults: %#v", current)
 	}
 	readme := string(readFile(t, filepath.Join(root, "README.md")))

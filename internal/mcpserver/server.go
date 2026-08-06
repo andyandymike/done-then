@@ -171,7 +171,7 @@ func (s *Server) initialize(raw json.RawMessage) (map[string]any, error) {
 			"name":    "done-then",
 			"version": s.version,
 		},
-		"instructions": "DoneThen is observe-only in this build. The execute arm mode is unavailable and no MCP or hook path can invoke a power action.",
+		"instructions": "DoneThen defaults to after_stop: an explicitly acknowledged, session-bound Stop can start a cancellable shutdown countdown without claiming task success. verified_success remains a separate strict mode and may be unavailable.",
 	}, nil
 }
 
@@ -232,22 +232,30 @@ func tools() []tool {
 		{
 			Name:        "arm",
 			Title:       "Arm DoneThen",
-			Description: "Create a time-limited one-shot shutdown grant. The public server currently exposes dry-run only; execute stays unavailable until an authoritative same-host integration is delivered.",
+			Description: "Create a time-limited one-shot shutdown grant. after_stop is the default observable trigger and intentionally does not mean task success; execute requires explicit acknowledgement and a cancellable delay.",
 			InputSchema: map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
 				"required": []string{
-					"action", "delay_seconds", "expires_in_seconds", "mode", "verifier_profile", "allow_agent_only_success",
+					"action", "trigger_policy", "acknowledge_stop_without_success", "delay_seconds", "expires_in_seconds", "mode", "verifier_profile", "allow_agent_only_success",
 				},
 				"properties": map[string]any{
-					"action":             map[string]any{"type": "string", "const": "shutdown"},
+					"action": map[string]any{"type": "string", "const": "shutdown"},
+					"trigger_policy": map[string]any{
+						"type": "string", "enum": []string{"after_stop", "verified_success"},
+						"description": "Use after_stop unless the user explicitly requests the experimental semantic completion gate",
+					},
+					"acknowledge_stop_without_success": map[string]any{
+						"type":        "boolean",
+						"description": "Must be true for after_stop execute; acknowledges that a normal Stop after partial, blocked, or question-ending work can trigger the countdown",
+					},
 					"delay_seconds":      map[string]any{"type": "integer", "minimum": 30, "maximum": 3600},
 					"expires_in_seconds": map[string]any{"type": "integer", "minimum": 60, "maximum": 86400},
 					"mode":               map[string]any{"type": "string", "enum": []string{"dry_run", "execute"}},
-					"verifier_profile":   stringProperty("Pre-registered verifier profile id, or none with an explicitly permitted agent-only boundary"),
+					"verifier_profile":   stringProperty("Use none for after_stop; a pre-registered verifier id is only for verified_success"),
 					"allow_agent_only_success": map[string]any{
 						"type":        "boolean",
-						"description": "Explicitly accept structured agent self-report when verifier_profile is none",
+						"description": "verified_success only: explicitly accept structured agent self-report when verifier_profile is none",
 					},
 				},
 			},
@@ -255,7 +263,7 @@ func tools() []tool {
 		{
 			Name:        "finish",
 			Title:       "Report DoneThen completion",
-			Description: "Validate structured completion and run the fixed registered verifier. The background supervisor still requires matching Hook, turn, task-inventory, and final host evidence before any action.",
+			Description: "verified_success only: validate structured completion and run the fixed registered verifier. after_stop never calls this tool.",
 			InputSchema: map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
@@ -269,7 +277,7 @@ func tools() []tool {
 		{
 			Name:        "pause",
 			Title:       "Pause DoneThen",
-			Description: "Invalidate completion evidence while the task waits for user, approval, or external state.",
+			Description: "verified_success only: invalidate completion evidence while the task waits. Cancel after_stop instead of pausing it.",
 			InputSchema: map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,

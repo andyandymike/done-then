@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -50,6 +51,7 @@ type Status struct {
 	ReasonCode        string `json:"reason_code,omitempty"`
 	Mode              string `json:"mode"`
 	Action            string `json:"action"`
+	TriggerPolicy     string `json:"trigger_policy"`
 	DelaySeconds      int64  `json:"delay_seconds"`
 	ExpiresAt         string `json:"expires_at"`
 	Generation        uint64 `json:"generation"`
@@ -195,7 +197,7 @@ func (s *Store) UpdateJob(jobID, eventName, eventKey string, mutate func(*Job, t
 	return job, true, nil
 }
 
-func (s *Store) BindSession(jobID, sessionID, turnID, eventKey string) (Job, bool, error) {
+func (s *Store) BindSession(jobID, sessionID, turnID, workspace, eventKey string) (Job, bool, error) {
 	if err := validateBinding(sessionID, turnID); err != nil {
 		return Job{}, false, err
 	}
@@ -227,6 +229,14 @@ func (s *Store) BindSession(jobID, sessionID, turnID, eventKey string) (Job, boo
 	if expire(&job, now) {
 		// Persist expiry below. A late hook must never revive the job.
 	} else if job.State == StateArmPendingBind {
+		if job.TriggerPolicy == TriggerAfterStop && !job.DryRun {
+			if !filepath.IsAbs(workspace) {
+				return Job{}, false, errors.New("after-stop execute hook is missing an absolute workspace")
+			}
+			job.WorkspaceCWD = filepath.Clean(workspace)
+		} else if job.TriggerPolicy == TriggerVerifiedSuccess && !WorkspaceMatches(job.WorkspaceCWD, workspace) {
+			return Job{}, false, errors.New("arm hook workspace does not match the MCP workspace")
+		}
 		if existing, found, err := s.findBySessionUnlocked(sessionID); err != nil {
 			return Job{}, false, err
 		} else if found && existing.JobID != job.JobID && existing.State.IsActive() {
@@ -238,6 +248,9 @@ func (s *Store) BindSession(jobID, sessionID, turnID, eventKey string) (Job, boo
 		job.ArmObserved = true
 		job.State = StateArmed
 		job.ReasonCode = "hook_bound"
+		if job.TriggerPolicy == TriggerAfterStop {
+			job.HookCompatibility = "session_bound"
+		}
 	} else if job.SessionID != sessionID || job.ArmTurnID != turnID {
 		return Job{}, false, errors.New("arm hook binding does not match the existing job binding")
 	}
@@ -260,6 +273,21 @@ func (s *Store) BindSession(jobID, sessionID, turnID, eventKey string) (Job, boo
 		return Job{}, false, err
 	}
 	return job, true, nil
+}
+
+func WorkspaceMatches(expected, observed string) bool {
+	if expected == "" {
+		return true
+	}
+	if !filepath.IsAbs(expected) || !filepath.IsAbs(observed) {
+		return false
+	}
+	expected = filepath.Clean(expected)
+	observed = filepath.Clean(observed)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(expected, observed)
+	}
+	return expected == observed
 }
 
 func (s *Store) writeSessionIndexUnlocked(sessionID, jobID string) error {
@@ -327,7 +355,10 @@ func (s *Store) Status(job Job) Status {
 	}
 	hostSnapshots = fmt.Sprintf("%d/3", count)
 	verifierStatus := "pending"
-	if job.VerifierProfile == "none" {
+	if job.TriggerPolicy == TriggerAfterStop {
+		verifierStatus = "not_required"
+		hostSnapshots = "not_required"
+	} else if job.VerifierProfile == "none" {
 		verifierStatus = "agent-only"
 	} else if job.VerifierPassed {
 		verifierStatus = "passed"
@@ -350,6 +381,7 @@ func (s *Store) Status(job Job) Status {
 		ReasonCode:        job.ReasonCode,
 		Mode:              mode,
 		Action:            job.Action,
+		TriggerPolicy:     string(job.TriggerPolicy),
 		DelaySeconds:      job.DelaySeconds,
 		ExpiresAt:         job.ExpiresAt.UTC().Format(time.RFC3339),
 		Generation:        job.Generation,
@@ -431,11 +463,18 @@ func migrate(job *Job) error {
 	switch job.SchemaVersion {
 	case CurrentSchemaVersion:
 		return nil
+	case "2":
+		job.SchemaVersion = CurrentSchemaVersion
+		job.TriggerPolicy = TriggerVerifiedSuccess
+		job.StopWithoutSuccessAck = false
+		return nil
 	case "1":
 		if !job.DryRun {
 			return errors.New("legacy plugin schema unexpectedly contains an execute job")
 		}
 		job.SchemaVersion = CurrentSchemaVersion
+		job.TriggerPolicy = TriggerVerifiedSuccess
+		job.StopWithoutSuccessAck = false
 		return nil
 	default:
 		return fmt.Errorf("unsupported plugin job schema %q", job.SchemaVersion)

@@ -28,7 +28,7 @@ func policyCommand(ctx context.Context, args []string, streams IO, deps dependen
 	flags.SetOutput(io.Discard)
 	codexPath := flags.String("codex-path", "", "Codex executable or standard shim")
 	pluginID := flags.String("plugin-id", "", "exact App Server plugin id")
-	apply := flags.Bool("apply", false, "write the reviewed identity policy without enabling public Plugin execute")
+	apply := flags.Bool("apply", false, "write the reviewed identity policy for experimental verified-success execute")
 	allowAgentOnly := flags.Bool("allow-agent-only-success", false, "permit explicitly approved execute jobs without a verifier")
 	if err := flags.Parse(args[1:]); err != nil {
 		return usageError(streams.Stderr, err)
@@ -98,7 +98,7 @@ func policyCommand(ctx context.Context, args []string, streams IO, deps dependen
 	if err != nil {
 		return runtimeError(streams.Stderr, supervisor.ExitStateError, "install power policy", err)
 	}
-	fmt.Fprintf(streams.Stdout, "[DoneThen] Policy installed at %s (%s). This records reviewed Hook identities but does not enable Plugin execute while authoritative same-host attachment is unavailable.\n", powerpolicy.Path(root), shortFingerprint(installed.Fingerprint))
+	fmt.Fprintf(streams.Stdout, "[DoneThen] Verified-success policy installed at %s (%s). after-stop execute does not use this policy; verified-success still requires authoritative same-host attachment.\n", powerpolicy.Path(root), shortFingerprint(installed.Fingerprint))
 	return 0
 }
 

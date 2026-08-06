@@ -10,7 +10,18 @@ import (
 	"github.com/andyandymike/done-then/internal/actions"
 )
 
-const CurrentSchemaVersion = "2"
+const CurrentSchemaVersion = "3"
+
+type TriggerPolicy string
+
+const (
+	TriggerAfterStop       TriggerPolicy = "after_stop"
+	TriggerVerifiedSuccess TriggerPolicy = "verified_success"
+)
+
+func (p TriggerPolicy) Valid() bool {
+	return p == TriggerAfterStop || p == TriggerVerifiedSuccess
+}
 
 type State string
 
@@ -68,6 +79,8 @@ type Job struct {
 	ReasonCode             string                   `json:"reason_code,omitempty"`
 	DryRun                 bool                     `json:"dry_run"`
 	Action                 string                   `json:"action"`
+	TriggerPolicy          TriggerPolicy            `json:"trigger_policy"`
+	StopWithoutSuccessAck  bool                     `json:"stop_without_success_acknowledged"`
 	DelaySeconds           int64                    `json:"delay_seconds"`
 	ExpiresAt              time.Time                `json:"expires_at"`
 	CreatedAt              time.Time                `json:"created_at"`
@@ -165,6 +178,9 @@ func Validate(job Job) error {
 	if job.Action != "shutdown" {
 		return fmt.Errorf("unsupported plugin action %q", job.Action)
 	}
+	if !job.TriggerPolicy.Valid() {
+		return fmt.Errorf("unsupported plugin trigger policy %q", job.TriggerPolicy)
+	}
 	if job.DelaySeconds < 30 || job.DelaySeconds > 3600 {
 		return fmt.Errorf("invalid shutdown delay %d", job.DelaySeconds)
 	}
@@ -187,12 +203,28 @@ func Validate(job Job) error {
 		if !filepath.IsAbs(job.WorkspaceCWD) {
 			return errors.New("execute plugin job requires an absolute workspace")
 		}
-		if job.VerifierProfile == "none" && !job.AllowAgentOnlySuccess {
-			return errors.New("execute plugin job requires a verifier or explicit agent-only approval")
+		if job.TriggerPolicy == TriggerAfterStop {
+			if !job.StopWithoutSuccessAck {
+				return errors.New("after-stop execute job requires explicit stop-without-success acknowledgement")
+			}
+		} else {
+			if job.VerifierProfile == "none" && !job.AllowAgentOnlySuccess {
+				return errors.New("verified-success execute job requires a verifier or explicit agent-only approval")
+			}
+			if job.PowerPolicyFingerprint == "" {
+				return errors.New("verified-success execute job requires a fixed power policy fingerprint")
+			}
 		}
-		if job.PowerPolicyFingerprint == "" {
-			return errors.New("execute plugin job requires a fixed power policy fingerprint")
+	}
+	if job.TriggerPolicy == TriggerAfterStop {
+		if job.VerifierProfile != "none" || job.AllowAgentOnlySuccess {
+			return errors.New("after-stop job cannot use semantic completion verification")
 		}
+		if job.PowerPolicyFingerprint != "" {
+			return errors.New("after-stop job cannot carry a verified-success power policy")
+		}
+	} else if job.StopWithoutSuccessAck {
+		return errors.New("verified-success job cannot acknowledge after-stop semantics")
 	}
 	if job.State == StateArmPendingBind {
 		if job.SessionID != "" || job.ArmTurnID != "" || job.ArmObserved {
@@ -203,7 +235,7 @@ func Validate(job Job) error {
 			return errors.New("active plugin job is missing its hook binding")
 		}
 	}
-	if (job.State == StateReadyPendingStop || job.State == StateStopObserved) &&
+	if job.TriggerPolicy == TriggerVerifiedSuccess && (job.State == StateReadyPendingStop || job.State == StateStopObserved) &&
 		(job.ReadyTurnID == "" || job.CompletionEvidenceHash == "") {
 		return errors.New("ready plugin job is missing completion evidence")
 	}

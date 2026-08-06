@@ -84,6 +84,9 @@ func TestConcurrentProcessesUseSerializedAtomicUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if updated.SchemaVersion != CurrentSchemaVersion || updated.TriggerPolicy != TriggerVerifiedSuccess {
+		t.Fatalf("legacy job migration = schema %q trigger %q", updated.SchemaVersion, updated.TriggerPolicy)
+	}
 	committed := int(successful.Load())
 	if committed == 0 {
 		t.Fatal("all concurrent updates timed out")
@@ -119,7 +122,8 @@ func TestUnresolvedIntentDoesNotExpireAndKeepsRecoveryReceipt(t *testing.T) {
 	job := Job{
 		SchemaVersion: CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
 		State: StateActionIntent, ReasonCode: "action_intent_recorded", Action: "shutdown", DelaySeconds: 120,
-		ExpiresAt: now.Add(time.Minute), CreatedAt: now, UpdatedAt: now, SessionID: "thread-1", ArmTurnID: "turn-1",
+		TriggerPolicy: TriggerVerifiedSuccess,
+		ExpiresAt:     now.Add(time.Minute), CreatedAt: now, UpdatedAt: now, SessionID: "thread-1", ArmTurnID: "turn-1",
 		Generation: 1, VerifierProfile: "none", AllowAgentOnlySuccess: true, HookCompatibility: "compatible",
 		ArmObserved: true, WorkspaceCWD: root, PowerPolicyFingerprint: "sha256:policy", ActionIntentAt: &now,
 		ScheduledFor: &deadline, PowerCapabilities: &capabilities, PowerReceipt: &receipt,

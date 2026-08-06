@@ -35,40 +35,40 @@
   });
 
   const scenarios = {
-    complete: {
+    stopped: {
       gates: {
-        intent: ["pass", "verified", "typed arm request"],
-        binding: ["pass", "bound", "matching lifecycle identity"],
-        evidence: ["pass", "valid", "checks passed · no remaining work"],
-        authority: ["hold", "hold", "same-host live proof required"],
+        intent: ["pass", "armed", "Stop is not a success verdict"],
+        binding: ["pass", "bound", "matching session · turn · workspace"],
+        stop: ["pass", "observed", "same armed turn · not a continuation"],
+        countdown: ["hold", "active", "minimum 120 seconds · cancellable"],
       },
-      title: "Machine stays on",
-      detail: "Code is present; current release evidence cannot authorize execution.",
-      code: "HOST_AUTHORITY_UNAVAILABLE",
+      title: "Countdown is active",
+      detail: "A new prompt in this task or explicit cancel keeps the machine on.",
+      code: "ACTION_SCHEDULED",
       tone: "hold",
     },
-    partial: {
+    continued: {
       gates: {
-        intent: ["pass", "verified", "typed arm request"],
-        binding: ["pass", "bound", "matching lifecycle identity"],
-        evidence: ["blocked", "rejected", "failed checks or remaining work"],
-        authority: ["blocked", "blocked", "completion gate did not pass"],
+        intent: ["pass", "armed", "explicit after-stop acceptance"],
+        binding: ["pass", "bound", "matching session · turn · workspace"],
+        stop: ["pass", "observed", "countdown had been requested"],
+        countdown: ["wait", "cancelled", "later user prompt revoked the grant"],
       },
       title: "Machine stays on",
-      detail: "Partial work is never promoted to successful completion.",
-      code: "VERIFICATION_FAILED",
-      tone: "blocked",
+      detail: "Continuing the conversation requests receipt-bound cancellation.",
+      code: "CANCELLED",
+      tone: "hold",
     },
-    approval: {
+    unsupported: {
       gates: {
-        intent: ["pass", "verified", "typed arm request"],
-        binding: ["pass", "bound", "matching lifecycle identity"],
-        evidence: ["wait", "paused", "agent is waiting for user approval"],
-        authority: ["blocked", "blocked", "approval-waiting state is not done"],
+        intent: ["pass", "armed", "explicit after-stop acceptance"],
+        binding: ["pass", "bound", "matching session · turn · workspace"],
+        stop: ["wait", "waiting", "no platform action can be armed"],
+        countdown: ["blocked", "blocked", "backend preflight is unsupported"],
       },
       title: "Machine stays on",
-      detail: "Waiting for a person pauses the job and withholds authority.",
-      code: "PAUSED",
+      detail: "Unsupported or unavailable platform backends fail closed.",
+      code: "PLATFORM_UNSUPPORTED",
       tone: "blocked",
     },
   };

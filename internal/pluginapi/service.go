@@ -30,16 +30,18 @@ type Result struct {
 }
 
 type Service struct {
-	store                    *pluginstate.Store
-	now                      func() time.Time
-	executeAvailable         bool
-	executeUnavailableReason string
-	workspace                string
-	profiles                 *verifierprofile.Registry
-	launcher                 JobLauncher
-	backend                  actions.Backend
-	powerPolicyFingerprint   string
-	allowAgentOnlySuccess    bool
+	store                             *pluginstate.Store
+	now                               func() time.Time
+	afterStopExecuteAvailable         bool
+	afterStopExecuteUnavailableReason string
+	verifiedExecuteAvailable          bool
+	verifiedExecuteUnavailableReason  string
+	workspace                         string
+	profiles                          *verifierprofile.Registry
+	launcher                          JobLauncher
+	backend                           actions.Backend
+	powerPolicyFingerprint            string
+	allowAgentOnlySuccess             bool
 }
 
 type JobLauncher interface {
@@ -47,14 +49,16 @@ type JobLauncher interface {
 }
 
 type Options struct {
-	ExecuteAvailable         bool
-	ExecuteUnavailableReason string
-	Workspace                string
-	Profiles                 *verifierprofile.Registry
-	Launcher                 JobLauncher
-	Backend                  actions.Backend
-	PowerPolicyFingerprint   string
-	AllowAgentOnlySuccess    bool
+	AfterStopExecuteAvailable         bool
+	AfterStopExecuteUnavailableReason string
+	ExecuteAvailable                  bool
+	ExecuteUnavailableReason          string
+	Workspace                         string
+	Profiles                          *verifierprofile.Registry
+	Launcher                          JobLauncher
+	Backend                           actions.Backend
+	PowerPolicyFingerprint            string
+	AllowAgentOnlySuccess             bool
 }
 
 func New(state *pluginstate.Store) (*Service, error) {
@@ -65,25 +69,32 @@ func NewWithOptions(state *pluginstate.Store, options Options) (*Service, error)
 	if state == nil {
 		return nil, errors.New("plugin state store is required")
 	}
-	if options.ExecuteAvailable {
+	if options.AfterStopExecuteAvailable || options.ExecuteAvailable {
 		if !filepath.IsAbs(options.Workspace) {
 			return nil, errors.New("plugin execute requires an absolute workspace")
 		}
-		if options.Profiles == nil || options.Launcher == nil || options.Backend == nil || options.PowerPolicyFingerprint == "" {
-			return nil, errors.New("plugin execute requires profiles, launcher, and power backend")
+		if options.Launcher == nil || options.Backend == nil {
+			return nil, errors.New("plugin execute requires a launcher and power backend")
+		}
+	}
+	if options.ExecuteAvailable {
+		if options.Profiles == nil || options.PowerPolicyFingerprint == "" {
+			return nil, errors.New("verified-success execute requires profiles and a fixed power policy")
 		}
 	}
 	return &Service{
-		store:                    state,
-		now:                      time.Now,
-		executeAvailable:         options.ExecuteAvailable,
-		executeUnavailableReason: options.ExecuteUnavailableReason,
-		workspace:                options.Workspace,
-		profiles:                 options.Profiles,
-		launcher:                 options.Launcher,
-		backend:                  options.Backend,
-		powerPolicyFingerprint:   options.PowerPolicyFingerprint,
-		allowAgentOnlySuccess:    options.AllowAgentOnlySuccess,
+		store:                             state,
+		now:                               time.Now,
+		afterStopExecuteAvailable:         options.AfterStopExecuteAvailable,
+		afterStopExecuteUnavailableReason: options.AfterStopExecuteUnavailableReason,
+		verifiedExecuteAvailable:          options.ExecuteAvailable,
+		verifiedExecuteUnavailableReason:  options.ExecuteUnavailableReason,
+		workspace:                         options.Workspace,
+		profiles:                          options.Profiles,
+		launcher:                          options.Launcher,
+		backend:                           options.Backend,
+		powerPolicyFingerprint:            options.PowerPolicyFingerprint,
+		allowAgentOnlySuccess:             options.AllowAgentOnlySuccess,
 	}, nil
 }
 
@@ -91,7 +102,7 @@ func (s *Service) Call(ctx context.Context, name string, raw json.RawMessage) Re
 	var result Result
 	switch name {
 	case "arm":
-		result = s.arm(raw)
+		result = s.arm(ctx, raw)
 	case "finish":
 		result = s.finish(ctx, raw)
 	case "pause":
@@ -103,23 +114,34 @@ func (s *Service) Call(ctx context.Context, name string, raw json.RawMessage) Re
 	default:
 		result = failure(name, "unknown_tool", "DoneThen does not provide that tool")
 	}
-	result.Structured["execute_available"] = s.executeAvailable
+	result.Structured["execute_available"] = s.afterStopExecuteAvailable || s.verifiedExecuteAvailable
+	result.Structured["after_stop_execute_available"] = s.afterStopExecuteAvailable
+	result.Structured["verified_success_execute_available"] = s.verifiedExecuteAvailable
 	return result
 }
 
 type armArguments struct {
-	Action                string `json:"action"`
-	DelaySeconds          int64  `json:"delay_seconds"`
-	ExpiresInSeconds      int64  `json:"expires_in_seconds"`
-	Mode                  string `json:"mode"`
-	VerifierProfile       string `json:"verifier_profile"`
-	AllowAgentOnlySuccess bool   `json:"allow_agent_only_success"`
+	Action                        string `json:"action"`
+	TriggerPolicy                 string `json:"trigger_policy"`
+	AcknowledgeStopWithoutSuccess bool   `json:"acknowledge_stop_without_success"`
+	DelaySeconds                  int64  `json:"delay_seconds"`
+	ExpiresInSeconds              int64  `json:"expires_in_seconds"`
+	Mode                          string `json:"mode"`
+	VerifierProfile               string `json:"verifier_profile"`
+	AllowAgentOnlySuccess         bool   `json:"allow_agent_only_success"`
 }
 
-func (s *Service) arm(raw json.RawMessage) Result {
+func (s *Service) arm(ctx context.Context, raw json.RawMessage) Result {
 	var args armArguments
 	if err := decodeArguments(raw, &args); err != nil {
 		return failure("arm", "invalid_arguments", err.Error())
+	}
+	triggerPolicy := pluginstate.TriggerPolicy(args.TriggerPolicy)
+	if triggerPolicy == "" {
+		triggerPolicy = pluginstate.TriggerAfterStop
+	}
+	if !triggerPolicy.Valid() {
+		return failure("arm", "invalid_trigger_policy", "trigger_policy must be after_stop or verified_success")
 	}
 	if args.Action != "shutdown" {
 		return failure("arm", "unsupported_action", "action must be shutdown")
@@ -133,23 +155,45 @@ func (s *Service) arm(raw json.RawMessage) Result {
 	if args.ExpiresInSeconds < minimumExpirySeconds || args.ExpiresInSeconds > maximumExpirySeconds {
 		return failure("arm", "invalid_expiry", "expires_in_seconds must be between 60 and 86400")
 	}
+	if triggerPolicy == pluginstate.TriggerAfterStop {
+		if args.VerifierProfile == "" {
+			args.VerifierProfile = "none"
+		}
+		if args.VerifierProfile != "none" || args.AllowAgentOnlySuccess {
+			return failure("arm", "semantic_verification_not_applicable", "after_stop must use verifier_profile=none and allow_agent_only_success=false")
+		}
+	} else if args.AcknowledgeStopWithoutSuccess {
+		return failure("arm", "invalid_acknowledgement", "verified_success cannot acknowledge after-stop semantics")
+	}
 	if args.Mode != "dry_run" {
 		if args.Mode != "execute" {
 			return failure("arm", "invalid_mode", "mode must be dry_run or execute")
 		}
-		if !s.executeAvailable {
-			reason := s.executeUnavailableReason
+		available := s.afterStopExecuteAvailable
+		reason := s.afterStopExecuteUnavailableReason
+		if triggerPolicy == pluginstate.TriggerVerifiedSuccess {
+			available = s.verifiedExecuteAvailable
+			reason = s.verifiedExecuteUnavailableReason
+		}
+		if !available {
 			if reason == "" {
-				reason = "plugin execute mode requires a validated local power policy and host authority"
+				if triggerPolicy == pluginstate.TriggerAfterStop {
+					reason = "after-stop execute is unavailable on this platform"
+				} else {
+					reason = "verified-success execute requires validated local policy and same-host authority"
+				}
 			}
 			return failure("arm", "execute_unavailable", reason)
 		}
+		if triggerPolicy == pluginstate.TriggerAfterStop && !args.AcknowledgeStopWithoutSuccess {
+			return failure("arm", "stop_without_success_acknowledgement_required", "after_stop execute requires explicit acknowledgement that any normal Stop for the armed turn can trigger shutdown regardless of task success")
+		}
 	}
-	if args.Mode == "dry_run" && args.VerifierProfile != "none" {
+	if triggerPolicy == pluginstate.TriggerVerifiedSuccess && args.Mode == "dry_run" && args.VerifierProfile != "none" {
 		return failure("arm", "verifier_profile_unavailable", "this build only supports verifier_profile=none in plugin dry-run mode")
 	}
 	var verifierFingerprint string
-	if args.Mode == "execute" {
+	if triggerPolicy == pluginstate.TriggerVerifiedSuccess && args.Mode == "execute" {
 		if args.VerifierProfile == "none" {
 			if !args.AllowAgentOnlySuccess || !s.allowAgentOnlySuccess {
 				return failure("arm", "independent_evidence_required", "execute requires a registered verifier profile or explicit allow_agent_only_success")
@@ -167,6 +211,20 @@ func (s *Service) arm(raw json.RawMessage) Result {
 		return failure("arm", "state_error", "could not create a one-shot job identity")
 	}
 	now := s.now().UTC()
+	if triggerPolicy == pluginstate.TriggerAfterStop && args.Mode == "execute" {
+		request := actions.PowerRequest{
+			JobID: jobIdentity.JobID, Action: args.Action, Delay: time.Duration(args.DelaySeconds) * time.Second,
+			Comment: "DoneThen after-stop preflight", RequestedAt: now,
+		}
+		capabilities, preflightErr := s.backend.Preflight(ctx, request)
+		if preflightErr != nil || !capabilities.ExecuteSupported {
+			return failure("arm", "power_unavailable", "the local power backend did not pass after-stop preflight")
+		}
+	}
+	powerPolicyFingerprint := ""
+	if triggerPolicy == pluginstate.TriggerVerifiedSuccess {
+		powerPolicyFingerprint = s.powerPolicyFingerprint
+	}
 	job := pluginstate.Job{
 		SchemaVersion:          pluginstate.CurrentSchemaVersion,
 		JobID:                  jobIdentity.JobID,
@@ -175,6 +233,8 @@ func (s *Service) arm(raw json.RawMessage) Result {
 		ReasonCode:             "awaiting_post_tool_hook",
 		DryRun:                 args.Mode == "dry_run",
 		Action:                 args.Action,
+		TriggerPolicy:          triggerPolicy,
+		StopWithoutSuccessAck:  args.AcknowledgeStopWithoutSuccess,
 		DelaySeconds:           args.DelaySeconds,
 		ExpiresAt:              now.Add(time.Duration(args.ExpiresInSeconds) * time.Second),
 		CreatedAt:              now,
@@ -185,7 +245,7 @@ func (s *Service) arm(raw json.RawMessage) Result {
 		HookCompatibility:      "not_evaluated",
 		WorkspaceCWD:           s.workspace,
 		VerifierFingerprint:    verifierFingerprint,
-		PowerPolicyFingerprint: s.powerPolicyFingerprint,
+		PowerPolicyFingerprint: powerPolicyFingerprint,
 	}
 	if err := s.store.Create(job); err != nil {
 		return failure("arm", "state_error", "could not persist the DoneThen job")
@@ -208,9 +268,15 @@ func (s *Service) arm(raw json.RawMessage) Result {
 		if err != nil {
 			return failureWithJob("arm", "state_error", "the supervisor started but its identity could not be persisted; cancel this job", job)
 		}
-		return success("arm", job, "Execute job armed; the one-shot supervisor is waiting for hook binding and host evidence")
+		if triggerPolicy == pluginstate.TriggerAfterStop {
+			return success("arm", job, "After-stop shutdown armed; the normal matching Stop can start the cancellable countdown")
+		}
+		return success("arm", job, "Verified-success job armed; the supervisor is waiting for hook binding and host evidence")
 	}
-	return success("arm", job, "Dry-run armed; waiting for the PostToolUse observer to bind this task")
+	if triggerPolicy == pluginstate.TriggerAfterStop {
+		return success("arm", job, "After-stop dry-run armed; the normal matching Stop will be recorded without scheduling power")
+	}
+	return success("arm", job, "Verified-success dry-run armed; waiting for completion evidence")
 }
 
 type finishArguments struct {
@@ -225,6 +291,13 @@ func (s *Service) finish(ctx context.Context, raw json.RawMessage) Result {
 	}
 	if err := pluginstate.ValidateJobID(args.JobID); err != nil {
 		return failure("finish", "invalid_job_id", "job_id is invalid")
+	}
+	current, err := s.store.Load(args.JobID)
+	if err != nil {
+		return failure("finish", "state_error", "could not load the DoneThen job")
+	}
+	if current.TriggerPolicy == pluginstate.TriggerAfterStop {
+		return failureWithJob("finish", "finish_not_required", "after_stop is driven only by the matching Stop hook; semantic completion is not evaluated", current)
 	}
 	envelope, err := completion.Parse(args.Completion)
 	if err != nil {
@@ -354,6 +427,13 @@ func (s *Service) pause(raw json.RawMessage) Result {
 	}
 	if !allowedPauseReason(args.Reason) {
 		return failure("pause", "invalid_reason", "reason must be blocked, approval_required, waiting_for_user, or external_state")
+	}
+	current, err := s.store.Load(args.JobID)
+	if err != nil {
+		return failure("pause", "state_error", "could not load the DoneThen job")
+	}
+	if current.TriggerPolicy == pluginstate.TriggerAfterStop {
+		return failureWithJob("pause", "pause_not_applicable", "after_stop has no semantic waiting state; cancel it instead", current)
 	}
 	job, _, err := s.store.UpdateJob(args.JobID, "mcp.pause", "", func(job *pluginstate.Job, now time.Time) error {
 		if expire(job, now) {
@@ -521,6 +601,7 @@ func success(tool string, job pluginstate.Job, message string) Result {
 			"job_id":              job.JobID,
 			"state":               job.State,
 			"reason_code":         job.ReasonCode,
+			"trigger_policy":      job.TriggerPolicy,
 			"generation":          job.Generation,
 			"execute_available":   false,
 			"power_action_called": false,
@@ -532,6 +613,7 @@ func failureWithJob(tool, code, message string, job pluginstate.Job) Result {
 	result := failure(tool, code, message)
 	result.Structured["job_id"] = job.JobID
 	result.Structured["state"] = job.State
+	result.Structured["trigger_policy"] = job.TriggerPolicy
 	result.Structured["generation"] = job.Generation
 	return result
 }

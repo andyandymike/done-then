@@ -1,7 +1,7 @@
 ---
 version: "alpha"
 name: DoneThen Interlock
-description: A calm, high-assurance visual system for a fail-closed coding-agent safety layer.
+description: A calm visual system for a cancellable shutdown handoff after Codex stops.
 colors:
   canvas: "#0B1110"
   canvas-deep: "#070C0B"
@@ -131,22 +131,24 @@ components:
 
 ## Overview
 
-DoneThen should feel like a trustworthy interlock panel, not a generic AI
-landing page and not a theatrical hacker terminal. The visual language comes
+DoneThen should feel like a trustworthy timer and interlock panel, not a generic
+AI landing page and not a theatrical hacker terminal. The visual language comes
 from safety checklists, process traces, and calm industrial instrumentation:
-dark low-glare surfaces, readable labels, one eucalyptus success color, and a
+dark low-glare surfaces, readable labels, one eucalyptus action color, and a
 small amber warning channel.
 
-The page's signature is the interactive evidence chain. It makes the product's
-fail-closed behavior understandable before the visitor reads the architecture
-documentation. Everything around that demonstration stays quiet and precise.
+The page's signature is the handoff from an armed Codex turn to a cancellable
+countdown. It must make the product outcome clear at a glance while keeping the
+central caveat equally visible: `Stop` is a lifecycle event, not proof of task
+success. Everything around that demonstration stays quiet and precise.
 
 ## Colors
 
 - **Canvas** is a green-black rather than pure black, reducing glare without
   drifting into neon cyberpunk.
 - **Text** is a soft mineral white. Muted copy remains comfortably readable.
-- **Safe** communicates verified evidence and is the only dominant accent.
+- **Safe** communicates an armed or cancellable path and is the only dominant
+  accent. It must not imply semantic task success.
 - **Signal** is reserved for observe-only or waiting states.
 - **Danger** appears only for failed or blocked evidence, never as decoration.
 - Decorative gradients are not part of the system. Depth comes from thin
@@ -191,9 +193,9 @@ real system boundary.
 ## Components
 
 - **Wordmark:** text-only `DoneThen`, with a small pre-alpha status label.
-- **Evidence chain:** ordered gates with pass, hold, wait, or blocked states.
-- **Scenario selector:** three buttons that expose complete, partial, and
-  approval-waiting outcomes without pretending execute mode exists.
+- **Handoff chain:** ordered arm, bind, Stop, countdown, and cancel states.
+- **Scenario selector:** normal Stop, continued conversation, and unsupported
+  platform outcomes, with the cancellation result shown explicitly.
 - **Command surface:** a real PowerShell snippet with copy support.
 - **Status strip:** short factual statements such as `OBSERVE-ONLY` and
   `FAIL-CLOSED`; never vanity statistics.
@@ -204,9 +206,10 @@ real system boundary.
 
 Do:
 
-- Lead with the user outcome—safe shutdown after Codex genuinely completes—then
-  explain why a stopped agent turn is not proof of completion.
-- Keep observe-only status visible in the hero and interactive result.
+- Lead with the user outcome—shut down after Codex stops—then immediately
+  explain why a stopped turn is not proof of successful completion.
+- Keep the pre-alpha capability and minimum cancellation window visible in the
+  hero and interactive result.
 - Use sequence numbers only for genuine lifecycle order.
 - Respect keyboard focus, reduced motion, and narrow viewports.
 - Prefer precise product language over claims such as "revolutionary" or
@@ -215,8 +218,8 @@ Do:
 Don't:
 
 - Use purple gradients, glowing orbs, emoji feature icons, or fake dashboards.
-- Present shutdown as available in the current plugin build.
-- Treat `Stop`, `SessionEnd`, or elapsed time as successful completion.
+- Present pending real-host acceptance as completed platform support.
+- Describe `Stop`, `SessionEnd`, or elapsed time as successful completion.
 - Scatter animation across every element; the evidence trace is the one
   orchestrated moment.
 - Copy another project's logo, marketing copy, screenshots, or brand assets.

@@ -1,65 +1,65 @@
 ---
 layout: default
 title: DoneThen
-description: Open-source fail-closed shutdown automation for Codex tasks, with capability claims tied to evidence.
+description: Open-source, cancellable shutdown automation that starts when an armed Codex turn stops.
 home: true
 ---
 
 <section class="hero">
   <div class="container-inner hero-grid">
     <div class="hero-copy">
-      <p class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span> Safe shutdown · fail closed</p>
-      <h1>Shut down your PC<br>after Codex is<br>truly <em>done.</em></h1>
+      <p class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span> Codex stops · countdown starts</p>
+      <h1>Shut down your PC<br>when Codex<br><em>stops.</em></h1>
       <p class="hero-lede">
-        DoneThen is an open-source safety layer for automatic shutdown after a
-        Codex task. It requires explicit intent and structured completion
-        evidence before any power action can be allowed.
+        DoneThen is an open-source Codex plugin that turns an explicitly armed
+        turn ending into a cancellable shutdown countdown. No watcher window,
+        no second Codex run.
       </p>
       <div class="hero-actions">
-        <a class="button button--primary" href="#safety-model">See how shutdown is gated</a>
+        <a class="button button--primary" href="#safety-model">See the handoff</a>
         <a class="button button--secondary" href="https://github.com/andyandymike/done-then">View source <span aria-hidden="true">↗</span></a>
       </div>
       <div class="hero-truth">
         <span class="status-lamp status-lamp--hold" aria-hidden="true"></span>
-        <p><strong>Power disabled by default.</strong> The complete gate is implemented, but real-host acceptance and authoritative same-host attachment are still pending.</p>
+        <p><strong>Pre-alpha preview.</strong> Windows and Linux execute paths exist, but real cancel and power-off release acceptance are still pending.</p>
       </div>
     </div>
 
     <section class="interlock" data-interlock aria-labelledby="interlock-title">
       <div class="interlock-head">
         <div>
-          <p class="panel-kicker">Policy trace / default dry run</p>
-          <h2 id="interlock-title">Shutdown evidence interlock</h2>
+          <p class="panel-kicker">Lifecycle trace / after_stop</p>
+          <h2 id="interlock-title">Cancellable shutdown handoff</h2>
         </div>
-        <span class="mode-badge">execute: unavailable</span>
+        <span class="mode-badge">execute: preview</span>
       </div>
 
       <div class="scenario-selector" role="group" aria-label="Completion scenario">
-        <button type="button" class="scenario-button is-active" data-scenario="complete" aria-pressed="true">Complete</button>
-        <button type="button" class="scenario-button" data-scenario="partial" aria-pressed="false">Partial</button>
-        <button type="button" class="scenario-button" data-scenario="approval" aria-pressed="false">Needs approval</button>
+        <button type="button" class="scenario-button is-active" data-scenario="stopped" aria-pressed="true">Stop observed</button>
+        <button type="button" class="scenario-button" data-scenario="continued" aria-pressed="false">Prompt sent</button>
+        <button type="button" class="scenario-button" data-scenario="unsupported" aria-pressed="false">Unsupported OS</button>
       </div>
 
       <ol class="gate-list" aria-live="polite">
         <li class="gate-row is-pass" data-gate="intent">
           <span class="gate-index">01</span>
-          <span class="gate-copy"><strong>Explicit user intent</strong><small>typed arm request</small></span>
-          <span class="gate-state">verified</span>
+          <span class="gate-copy"><strong>Explicit user acceptance</strong><small>Stop is not a success verdict</small></span>
+          <span class="gate-state">armed</span>
         </li>
         <li class="gate-row is-pass" data-gate="binding">
           <span class="gate-index">02</span>
-          <span class="gate-copy"><strong>Task + turn binding</strong><small>matching lifecycle identity</small></span>
+          <span class="gate-copy"><strong>Session + turn binding</strong><small>matching workspace identity</small></span>
           <span class="gate-state">bound</span>
         </li>
-        <li class="gate-row is-pass" data-gate="evidence">
+        <li class="gate-row is-pass" data-gate="stop">
           <span class="gate-index">03</span>
-          <span class="gate-copy"><strong>Completion evidence</strong><small>checks passed · no remaining work</small></span>
-          <span class="gate-state">valid</span>
+          <span class="gate-copy"><strong>Normal Stop observed</strong><small>same armed turn · not a continuation</small></span>
+          <span class="gate-state">observed</span>
         </li>
-        <li class="gate-row is-hold" data-gate="authority">
+        <li class="gate-row is-hold" data-gate="countdown">
           <span class="gate-index">04</span>
-          <span class="gate-copy"><strong>External final gate</strong><small>same-host live proof required</small></span>
-          <span class="gate-state">hold</span>
+          <span class="gate-copy"><strong>Shutdown countdown</strong><small>minimum 120 seconds · cancellable</small></span>
+          <span class="gate-state">active</span>
         </li>
       </ol>
 
@@ -67,10 +67,10 @@ home: true
         <span class="result-mark" aria-hidden="true"></span>
         <div>
           <p class="result-label">Decision</p>
-          <strong data-result-title>Machine stays on</strong>
-          <span data-result-detail>Code is present; current release evidence cannot authorize execution.</span>
+          <strong data-result-title>Countdown is active</strong>
+          <span data-result-detail>A new prompt in this task or explicit cancel keeps the machine on.</span>
         </div>
-        <code data-result-code>HOST_AUTHORITY_UNAVAILABLE</code>
+        <code data-result-code>ACTION_SCHEDULED</code>
       </div>
     </section>
   </div>
@@ -78,7 +78,7 @@ home: true
 
 <section class="truth-strip" aria-label="Project guarantees">
   <div class="container-inner truth-strip-inner">
-    <span><i aria-hidden="true"></i> Fail closed by default</span>
+    <span><i aria-hidden="true"></i> Two-minute cancel window</span>
     <span><i aria-hidden="true"></i> No second watcher window</span>
     <span><i aria-hidden="true"></i> Existing hooks preserved</span>
     <span><i aria-hidden="true"></i> Prompts are not persisted</span>
@@ -89,11 +89,11 @@ home: true
   <div class="container-inner problem-grid">
     <div class="section-heading">
       <p class="eyebrow">The safety model</p>
-      <h2>Turn endings are signals.<br>They are not verdicts.</h2>
+      <h2>Stop is a moment.<br>It is not a verdict.</h2>
     </div>
     <div class="problem-copy">
-      <p class="lead-copy">An agent can stop because the work is finished. It can also stop while waiting for approval, reporting a failed test, asking a question, or handing back partial work.</p>
-      <p>DoneThen keeps those states separate. Unknown, malformed, interrupted, partial, blocked, approval-waiting, and failed outcomes all resolve to the same safe decision: <strong>do nothing.</strong></p>
+      <p class="lead-copy">An agent can stop because the work is finished. It can also stop while reporting a failed check, asking a question, or handing back partial work.</p>
+      <p>DoneThen does not pretend to know the difference in its default mode. It requires you to accept that exact lifecycle rule, then gives you at least two minutes to cancel.</p>
     </div>
   </div>
 
@@ -101,17 +101,17 @@ home: true
     <article class="principle">
       <span class="principle-index">01 / INTENT</span>
       <h3>The user asks once, inside the original task.</h3>
-      <p>A typed, time-limited arm request records what may happen. The model cannot invent a post-task command or silently widen that authority.</p>
+      <p>A typed, time-limited arm request records what may happen and explicitly acknowledges that Stop may not mean success.</p>
     </article>
     <article class="principle">
-      <span class="principle-index">02 / EVIDENCE</span>
-      <h3>Completion is structured, bound, and invalidatable.</h3>
-      <p>The Skill and Hooks bind evidence to the same session and turn. A later prompt invalidates stale READY evidence instead of reusing it.</p>
+      <span class="principle-index">02 / BINDING</span>
+      <h3>The grant belongs to one session and turn.</h3>
+      <p>The arm Hook binds the job to the current session, turn, and workspace. A Stop-Hook continuation cancels instead of widening the grant.</p>
     </article>
     <article class="principle">
-      <span class="principle-index">03 / AUTHORITY</span>
-      <h3>The final decision lives outside the Hook.</h3>
-      <p><code>Stop</code> and <code>SessionEnd</code> remain observations. A narrow external supervisor must pass every gate before a cancellable action can exist.</p>
+      <span class="principle-index">03 / CANCEL</span>
+      <h3>The countdown remains recoverable.</h3>
+      <p>The Hook only records lifecycle state. A detached supervisor owns the receipt, and a later prompt in the same task or explicit cancel asks the platform backend to abort.</p>
     </article>
   </div>
 </section>
@@ -120,7 +120,7 @@ home: true
   <div class="container-inner">
     <div class="flow-intro">
       <div class="section-heading">
-        <p class="eyebrow">One task · one evidence chain</p>
+        <p class="eyebrow">One task · one lifecycle handoff</p>
         <h2>No watcher window.<br>No second Codex run.</h2>
       </div>
       <p>The primary integration is a Codex plugin. Codex starts the typed MCP server and narrow lifecycle observers as transport—not as another program the user has to babysit.</p>
@@ -139,18 +139,18 @@ home: true
       </li>
       <li>
         <span class="lifecycle-number">03</span>
-        <div><strong>Work</strong><small>Pause and resume stay explicit</small></div>
-        <code>pause | resume</code>
+        <div><strong>Wait</strong><small>Detached supervisor stays outside the Hook</small></div>
+        <code>supervise</code>
       </li>
       <li>
         <span class="lifecycle-number">04</span>
-        <div><strong>Finish</strong><small>Structured evidence is validated</small></div>
-        <code>mcp.finish</code>
+        <div><strong>Stop</strong><small>Normal Stop advances this one grant</small></div>
+        <code>hook.stop</code>
       </li>
       <li>
         <span class="lifecycle-number">05</span>
-        <div><strong>Gate</strong><small>Host, verifier, tasks, Hooks, platform</small></div>
-        <code>supervisor.final</code>
+        <div><strong>Countdown</strong><small>Platform receipt remains cancellable</small></div>
+        <code>action.scheduled</code>
       </li>
     </ol>
   </div>
@@ -161,7 +161,7 @@ home: true
     <div class="section-heading">
       <p class="eyebrow">What exists today</p>
       <h2>Implemented without overstating support.</h2>
-      <p>The public plugin exposes dry-run only. Policy capture cannot enable the destructive path until an authoritative same-host attachment and real platform evidence exist.</p>
+      <p>The default after-stop path can request execute on Windows and systemd Linux. It remains preview software: real cancel and power-off acceptance has not been completed.</p>
       <a class="text-link" href="{{ '/plugin-development.html' | relative_url }}">Read the plugin development guide <span aria-hidden="true">→</span></a>
     </div>
 
@@ -169,24 +169,24 @@ home: true
       <div class="ledger-group">
         <p class="ledger-title"><span class="status-lamp status-lamp--pass" aria-hidden="true"></span> Implemented</p>
         <ul>
-          <li>Typed <code>arm</code>, <code>finish</code>, <code>pause</code>, <code>cancel</code>, and <code>status</code></li>
-          <li>Task and turn binding with stale-evidence invalidation</li>
+          <li>Default <code>after_stop</code> arm plus <code>cancel</code> and <code>status</code></li>
+          <li>Session, turn, and workspace binding with continuation cancellation</li>
           <li>Atomic job state and redacted lifecycle event logs</li>
           <li>Non-interfering plugin-owned lifecycle observers</li>
           <li>Detached one-shot supervisor with monitored, cancellable countdown</li>
-          <li>App Server evidence adapter with fail-closed host ownership checks</li>
+          <li>Separate experimental verified-success and App Server evidence path</li>
           <li>Fixed verifier profiles, receipts, cancellation, and reconciliation</li>
           <li>Windows backend and Linux systemd helper code</li>
           <li>Capability-bound archives, checksums, provenance, and SPDX SBOMs</li>
         </ul>
       </div>
       <div class="ledger-group ledger-group--hold">
-        <p class="ledger-title"><span class="status-lamp status-lamp--hold" aria-hidden="true"></span> Deliberately unavailable</p>
+        <p class="ledger-title"><span class="status-lamp status-lamp--hold" aria-hidden="true"></span> Not yet accepted or delivered</p>
         <ul>
-          <li>Supported power actions from the plugin workflow</li>
-          <li>Stable authoritative attachment to the current Codex host</li>
-          <li>Real cancel, power-off, and post-boot acceptance evidence</li>
-          <li>Signed Windows and signed/notarized macOS releases</li>
+          <li>Real Windows and Linux cancel/power-off release evidence</li>
+          <li>Verified-success execute and authoritative App Server attachment</li>
+          <li>Published signed release artifacts</li>
+          <li>A signed/notarized macOS power helper</li>
         </ul>
       </div>
       <div class="ledger-group">
@@ -206,7 +206,7 @@ home: true
     <div class="section-heading">
       <p class="eyebrow">Build the pre-alpha source</p>
       <h2>Review it before you run it.</h2>
-      <p>There is no supported power release yet. Keep antivirus protection enabled and build only from a checkout you can inspect.</p>
+      <p>There is no supported binary release yet. Keep antivirus protection enabled and build only from a checkout you can inspect.</p>
       <div class="build-links">
         <a class="button button--primary" href="https://github.com/andyandymike/done-then">Open repository <span aria-hidden="true">↗</span></a>
         <a class="button button--secondary" href="{{ '/release-checklist.html' | relative_url }}">Release checklist</a>
@@ -234,7 +234,7 @@ go build -trimpath -o bin\donethen.exe ./cmd/donethen</code></pre>
 <section class="closing-cta">
   <div class="container-inner closing-inner">
     <p class="eyebrow">The invariant</p>
-    <p class="closing-statement">When the evidence is uncertain,<br><strong>the machine stays on.</strong></p>
+    <p class="closing-statement">When intent or cancellation is uncertain,<br><strong>the machine stays on.</strong></p>
     <a class="text-link" href="https://github.com/andyandymike/done-then#safety-model">Inspect every safety boundary <span aria-hidden="true">↗</span></a>
   </div>
 </section>

@@ -110,7 +110,7 @@ func TestMCPCommandWritesOnlyJSONRPCResponses(t *testing.T) {
 	}
 }
 
-func TestPublicMCPRejectsExecuteEvenWithInstalledPolicy(t *testing.T) {
+func TestPublicMCPRejectsVerifiedSuccessExecuteEvenWithInstalledPolicy(t *testing.T) {
 	root := t.TempDir()
 	executable, err := os.Executable()
 	if err != nil {
@@ -130,7 +130,7 @@ func TestPublicMCPRejectsExecuteEvenWithInstalledPolicy(t *testing.T) {
 	input := strings.Join([]string{
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cli-test","version":"1"}}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
-		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"arm","arguments":{"action":"shutdown","delay_seconds":120,"expires_in_seconds":3600,"mode":"execute","verifier_profile":"none","allow_agent_only_success":true}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"arm","arguments":{"action":"shutdown","trigger_policy":"verified_success","acknowledge_stop_without_success":false,"delay_seconds":120,"expires_in_seconds":3600,"mode":"execute","verifier_profile":"none","allow_agent_only_success":true}}}`,
 	}, "\n")
 	var stdout, stderr bytes.Buffer
 	exitCode := runWithDependencies(context.Background(), []string{"mcp"}, IO{
@@ -154,7 +154,7 @@ func TestPublicMCPRejectsExecuteEvenWithInstalledPolicy(t *testing.T) {
 	}
 	structured, ok := result["structuredContent"].(map[string]any)
 	if !ok || structured["reason_code"] != "execute_unavailable" ||
-		structured["execute_available"] != false ||
+		structured["verified_success_execute_available"] != false ||
 		structured["power_action_called"] != false {
 		t.Fatalf("execute result = %#v", structured)
 	}
@@ -246,7 +246,8 @@ func TestCancelPersistsPluginActionIntentRequestUntilSchedulerSettles(t *testing
 	job := pluginstate.Job{
 		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
 		State: pluginstate.StateActionIntent, ReasonCode: "power_schedule_outcome_unknown", Action: "shutdown", DelaySeconds: 120,
-		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, SessionID: "thread-1", ArmTurnID: "turn-1",
+		TriggerPolicy: pluginstate.TriggerVerifiedSuccess,
+		ExpiresAt:     now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, SessionID: "thread-1", ArmTurnID: "turn-1",
 		Generation: 2, VerifierProfile: "none", AllowAgentOnlySuccess: true, HookCompatibility: "compatible",
 		ArmObserved: true, WorkspaceCWD: root, PowerPolicyFingerprint: "sha256:policy", ActionIntentAt: &now,
 		ScheduledFor: &deadline, PowerCapabilities: &capabilities, PowerReceipt: &receipt,
@@ -299,8 +300,8 @@ func TestDoctorIsReadOnlyAtPowerBoundary(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.ExecuteAvailable {
-		t.Fatal("doctor enabled execute without a local policy")
+	if !report.ExecuteAvailable || !report.AfterStopExecuteAvailable || report.VerifiedSuccessExecuteAvailable {
+		t.Fatalf("doctor capability split = %#v", report)
 	}
 	scheduleCalls, cancelCalls, _, _ := backend.Snapshot()
 	if scheduleCalls != 0 || cancelCalls != 0 || backend.ReconcileCalls != 0 || backend.PreflightCalls != 1 {
@@ -331,7 +332,8 @@ func TestReconcilePluginReceiptNeverRetriesAction(t *testing.T) {
 	job := pluginstate.Job{
 		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
 		State: pluginstate.StateActionScheduled, ReasonCode: "action_scheduled", Action: "shutdown", DelaySeconds: 120,
-		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, SessionID: "thread-1", ArmTurnID: "turn-1",
+		TriggerPolicy: pluginstate.TriggerVerifiedSuccess,
+		ExpiresAt:     now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, SessionID: "thread-1", ArmTurnID: "turn-1",
 		Generation: 2, VerifierProfile: "none", AllowAgentOnlySuccess: true, HookCompatibility: "compatible",
 		ArmObserved: true, WorkspaceCWD: root, PowerPolicyFingerprint: "sha256:policy", ActionIntentAt: &now,
 		ScheduledFor: &deadline, PowerCapabilities: &capabilities, PowerReceipt: &receipt,
@@ -386,7 +388,8 @@ func TestEarlyUnverifiedReconcileKeepsPluginCountdownCancellable(t *testing.T) {
 	job := pluginstate.Job{
 		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
 		State: pluginstate.StateActionScheduled, ReasonCode: "action_scheduled", Action: "shutdown", DelaySeconds: 300,
-		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, SessionID: "thread-1", ArmTurnID: "turn-1",
+		TriggerPolicy: pluginstate.TriggerVerifiedSuccess,
+		ExpiresAt:     now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, SessionID: "thread-1", ArmTurnID: "turn-1",
 		Generation: 2, VerifierProfile: "none", AllowAgentOnlySuccess: true, HookCompatibility: "compatible",
 		ArmObserved: true, WorkspaceCWD: root, PowerPolicyFingerprint: "sha256:policy", ActionIntentAt: &now,
 		ScheduledFor: &deadline, PowerCapabilities: &capabilities, PowerReceipt: &receipt,

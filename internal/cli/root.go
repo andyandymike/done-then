@@ -10,7 +10,7 @@ import (
 	"github.com/andyandymike/done-then/internal/platform"
 )
 
-var Version = "0.1.0-dev"
+var Version = "0.2.0-dev"
 
 type IO struct {
 	Stdin  io.Reader
@@ -141,7 +141,7 @@ func printDoctorUsage(writer io.Writer) {
 
 func printPolicyUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "Usage: donethen policy capture --plugin-id ID [--codex-path PATH] [--allow-agent-only-success] [--apply]")
-	fmt.Fprintln(writer, "Reads the effective Hook inventory. Without --apply it is plan-only and writes nothing.")
+	fmt.Fprintln(writer, "Captures policy only for experimental verified-success execute. after-stop does not require it.")
 }
 
 func printVerifierUsage(writer io.Writer) {
@@ -162,7 +162,7 @@ func printHookUsage(writer io.Writer) {
 }
 
 func printUsage(writer io.Writer) {
-	fmt.Fprintln(writer, "DoneThen - safe post-task actions for coding agents")
+	fmt.Fprintln(writer, "DoneThen - cancellable actions when Codex stops")
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "Usage:")
 	fmt.Fprintln(writer, "  donethen run [options] -- codex exec [options] PROMPT")
@@ -170,7 +170,7 @@ func printUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "  donethen status [job-id]")
 	fmt.Fprintln(writer, "  donethen reconcile <job-id>  Read-only post-boot action reconciliation")
 	fmt.Fprintln(writer, "  donethen doctor              Read-only capability and safety diagnostics")
-	fmt.Fprintln(writer, "  donethen policy capture ...  Plan or record reviewed identity for future Plugin execute")
+	fmt.Fprintln(writer, "  donethen policy capture ...  Experimental verified-success policy capture")
 	fmt.Fprintln(writer, "  donethen verifier ...        Plan, install, or list fixed verifier profiles")
 	fmt.Fprintln(writer, "  donethen mcp                 Plugin transport (normally launched by Codex)")
 	fmt.Fprintln(writer, "  donethen hook                Plugin observer (normally launched by Codex)")

@@ -9,6 +9,15 @@ published a tagged release.
 
 ### Added
 
+- Default `after_stop` plugin policy that binds an arm to the current Codex
+  session, turn, and workspace, then advances directly from a normal `Stop` to
+  a detached, cancellable shutdown countdown without claiming task success.
+- Explicit acknowledgement for after-stop execute, a minimum two-minute
+  cancellation window, cancellation on later prompts and Stop-Hook
+  continuations, and dry-run completion without `finish` or a verifier.
+- Separate execute-availability reporting for the default `after_stop` and
+  experimental `verified_success` policies.
+
 - Windows-first `codex exec` supervisor with dry-run as the default.
 - Strict structured completion envelope and fail-closed completion policy.
 - Optional argv-only external verifier.
@@ -53,14 +62,17 @@ published a tagged release.
 - Dangerous Codex flags are rejected unless explicitly allowed.
 - Model output cannot select the action executable or action argv.
 - Automated tests never invoke a real power action.
-- Public Plugin execute is unavailable even after policy capture until a stable
-  authoritative same-host attachment exists. Missing Hook, task, verifier,
-  privilege, cancellation, or backend evidence fails closed.
+- After-stop execute preflights the fixed platform backend before persisting a
+  job and again before scheduling. A missing session/turn/workspace binding,
+  unsupported backend, power-job conflict, or cancellation uncertainty fails
+  closed.
+- Experimental verified-success execute remains unavailable until a stable
+  authoritative same-host attachment exists.
 - Manual cancellation is persisted before backend cancellation; an in-flight
   scheduling outcome remains unresolved until a confirmed cancellation can
   safely terminalize it.
-- Observer Hooks emit no stdout, do not steer Codex, and cannot reach the
-  action backend.
+- Observer Hooks emit no stdout, do not steer Codex, and never schedule a power
+  action; scheduling remains in the detached supervisor.
 - Unknown schedule outcomes retain a cancellable recovery intent and are never
   retried automatically.
 
@@ -72,9 +84,10 @@ published a tagged release.
   `arm64`, but only Windows `amd64` currently reaches C2; all others are C1.
 - Windows binaries are not code-signed, and macOS binaries are neither signed
   nor notarized.
-- Conditional Plugin execute code exists, but the public MCP server deliberately
-  keeps it unavailable while stable authoritative attachment to the current
-  Codex host and real power acceptance remain blockers.
+- Public after-stop execute is a pre-alpha preview on Windows and systemd Linux;
+  real cancel and power-off acceptance remain incomplete. Experimental
+  verified-success execute remains unavailable pending authoritative host
+  attachment.
 - The local development scripts have automated dry-run coverage, but a live
   installed-plugin and trusted-Hook smoke record has not yet been completed.
 - Linux helper installation and real-host cancel/power-off acceptance are not

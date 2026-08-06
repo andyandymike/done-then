@@ -15,12 +15,18 @@ import (
 	"github.com/andyandymike/done-then/internal/pluginstate"
 )
 
+type observerTestLauncher struct{}
+
+func (observerTestLauncher) Launch(string) (int, error) { return 4242, nil }
+
 func TestObserveOnlyLifecycleBindsFinishesAndRecordsStop(t *testing.T) {
 	state, service, observer := testComponents(t)
 	arm := service.Call(context.Background(), "arm", json.RawMessage(`{
 		"action":"shutdown",
 		"delay_seconds":120,
 		"expires_in_seconds":3600,
+		"trigger_policy":"verified_success",
+		"acknowledge_stop_without_success":false,
 		"mode":"dry_run",
 		"verifier_profile":"none",
 		"allow_agent_only_success":true
@@ -94,6 +100,7 @@ func TestUserPromptInvalidatesReadyEvidence(t *testing.T) {
 	state, service, observer := testComponents(t)
 	arm := service.Call(context.Background(), "arm", json.RawMessage(`{
 		"action":"shutdown","delay_seconds":120,"expires_in_seconds":3600,
+		"trigger_policy":"verified_success","acknowledge_stop_without_success":false,
 		"mode":"dry_run","verifier_profile":"none","allow_agent_only_success":true
 	}`))
 	jobID := arm.Structured["job_id"].(string)
@@ -132,6 +139,7 @@ func TestStopWithoutReadyIsObserverOnlyNoOp(t *testing.T) {
 	state, service, observer := testComponents(t)
 	arm := service.Call(context.Background(), "arm", json.RawMessage(`{
 		"action":"shutdown","delay_seconds":120,"expires_in_seconds":3600,
+		"trigger_policy":"verified_success","acknowledge_stop_without_success":false,
 		"mode":"dry_run","verifier_profile":"none","allow_agent_only_success":false
 	}`))
 	jobID := arm.Structured["job_id"].(string)
@@ -142,6 +150,155 @@ func TestStopWithoutReadyIsObserverOnlyNoOp(t *testing.T) {
 	job, err := state.Load(jobID)
 	if err != nil || job.State != pluginstate.StateArmed {
 		t.Fatalf("unready Stop changed authority: %#v, %v", job, err)
+	}
+}
+
+func TestAfterStopDryRunCompletesOnFirstMatchingStopWithoutFinish(t *testing.T) {
+	state, service, observer := testComponents(t)
+	arm := service.Call(context.Background(), "arm", json.RawMessage(`{
+		"action":"shutdown","trigger_policy":"after_stop","acknowledge_stop_without_success":false,
+		"delay_seconds":120,"expires_in_seconds":3600,"mode":"dry_run",
+		"verifier_profile":"none","allow_agent_only_success":false
+	}`))
+	if arm.IsError {
+		t.Fatalf("arm failed: %#v", arm)
+	}
+	jobID := arm.Structured["job_id"].(string)
+	observeTool(t, observer, "session-after-stop", "turn-1", "call-arm", "arm", json.RawMessage(`{}`), arm)
+	if err := observer.Handle(strings.NewReader(`{
+		"session_id":"session-after-stop","turn_id":"turn-1","hook_event_name":"Stop","stop_hook_active":false
+	}`)); err != nil {
+		t.Fatal(err)
+	}
+	job, err := state.Load(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != pluginstate.StateDryRunComplete || job.StopTurnID != "turn-1" ||
+		job.ReasonCode != "after_stop_observed_no_action" {
+		t.Fatalf("after-stop dry-run = %#v", job)
+	}
+	finish := service.Call(context.Background(), "finish", json.RawMessage(`{
+		"job_id":"`+jobID+`",
+		"completion":{"schema_version":"1","status":"done","summary":"ignored","checks":[],"remaining_work":[],"approval_required":false}
+	}`))
+	if !finish.IsError || finish.Structured["reason_code"] != "finish_not_required" {
+		t.Fatalf("after-stop finish = %#v", finish)
+	}
+}
+
+func TestAfterStopExecuteUsesHookWorkspaceAndWaitsForMatchingStop(t *testing.T) {
+	root := t.TempDir()
+	state, err := pluginstate.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := pluginapi.NewWithOptions(state, pluginapi.Options{
+		AfterStopExecuteAvailable: true,
+		Workspace:                 root,
+		Launcher:                  observerTestLauncher{},
+		Backend:                   &actions.FakeBackend{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer, err := New(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arm := service.Call(context.Background(), "arm", json.RawMessage(`{
+		"action":"shutdown","trigger_policy":"after_stop","acknowledge_stop_without_success":true,
+		"delay_seconds":120,"expires_in_seconds":3600,"mode":"execute",
+		"verifier_profile":"none","allow_agent_only_success":false
+	}`))
+	if arm.IsError {
+		t.Fatalf("arm failed: %#v", arm)
+	}
+	jobID := arm.Structured["job_id"].(string)
+	hookWorkspace := filepath.Join(root, "actual-workspace")
+	observeToolAtWorkspace(t, observer, "session-workspace", "turn-1", "call-arm", "arm", hookWorkspace, json.RawMessage(`{}`), arm)
+
+	bound, err := state.Load(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.State != pluginstate.StateArmed || bound.WorkspaceCWD != filepath.Clean(hookWorkspace) {
+		t.Fatalf("hook-bound after-stop job = %#v", bound)
+	}
+	stop, err := json.Marshal(map[string]any{
+		"session_id": "session-workspace", "turn_id": "turn-1", "cwd": hookWorkspace,
+		"hook_event_name": "Stop", "stop_hook_active": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := observer.Handle(strings.NewReader(string(stop))); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := state.Load(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.State != pluginstate.StateStopObserved || stopped.StopTurnID != "turn-1" {
+		t.Fatalf("matching after-stop execute job = %#v", stopped)
+	}
+	if err := observer.Handle(strings.NewReader(`{
+		"session_id":"session-workspace","hook_event_name":"SessionEnd","reason":"exit"
+	}`)); err != nil {
+		t.Fatal(err)
+	}
+	afterSessionEnd, err := state.Load(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterSessionEnd.State != pluginstate.StateStopObserved || afterSessionEnd.StopTurnID != "turn-1" {
+		t.Fatalf("SessionEnd revoked accepted after-stop grant = %#v", afterSessionEnd)
+	}
+}
+
+func TestAfterStopGrantIsCancelledByNextUserPrompt(t *testing.T) {
+	state, service, observer := testComponents(t)
+	arm := service.Call(context.Background(), "arm", json.RawMessage(`{
+		"action":"shutdown","trigger_policy":"after_stop","acknowledge_stop_without_success":false,
+		"delay_seconds":120,"expires_in_seconds":3600,"mode":"dry_run",
+		"verifier_profile":"none","allow_agent_only_success":false
+	}`))
+	jobID := arm.Structured["job_id"].(string)
+	observeTool(t, observer, "session-cancel", "turn-1", "call-arm", "arm", json.RawMessage(`{}`), arm)
+	if err := observer.Handle(strings.NewReader(`{
+		"session_id":"session-cancel","turn_id":"turn-2","hook_event_name":"UserPromptSubmit","prompt":"continue"
+	}`)); err != nil {
+		t.Fatal(err)
+	}
+	job, err := state.Load(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != pluginstate.StateCancelled || job.ReasonCode != "new_prompt_cancelled_after_stop_grant" {
+		t.Fatalf("continued after-stop job = %#v", job)
+	}
+}
+
+func TestAfterStopGrantIsCancelledInsideStopHookContinuation(t *testing.T) {
+	state, service, observer := testComponents(t)
+	arm := service.Call(context.Background(), "arm", json.RawMessage(`{
+		"action":"shutdown","trigger_policy":"after_stop","acknowledge_stop_without_success":false,
+		"delay_seconds":120,"expires_in_seconds":3600,"mode":"dry_run",
+		"verifier_profile":"none","allow_agent_only_success":false
+	}`))
+	jobID := arm.Structured["job_id"].(string)
+	observeTool(t, observer, "session-hook-loop", "turn-1", "call-arm", "arm", json.RawMessage(`{}`), arm)
+	if err := observer.Handle(strings.NewReader(`{
+		"session_id":"session-hook-loop","turn_id":"turn-1","hook_event_name":"Stop","stop_hook_active":true
+	}`)); err != nil {
+		t.Fatal(err)
+	}
+	job, err := state.Load(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != pluginstate.StateCancelled || job.ReasonCode != "stop_hook_continuation_cancelled_grant" {
+		t.Fatalf("stop-hook continuation job = %#v", job)
 	}
 }
 
@@ -159,14 +316,15 @@ func TestUserPromptPreservesScheduledReceiptAndRequestsCancellation(t *testing.T
 	job := pluginstate.Job{
 		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
 		State: pluginstate.StateArmPendingBind, ReasonCode: "awaiting_hook", Action: "shutdown", DelaySeconds: 120,
-		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, Generation: 1,
+		TriggerPolicy: pluginstate.TriggerVerifiedSuccess,
+		ExpiresAt:     now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, Generation: 1,
 		VerifierProfile: "none", AllowAgentOnlySuccess: true, HookCompatibility: "not_evaluated",
 		WorkspaceCWD: root, PowerPolicyFingerprint: "sha256:policy",
 	}
 	if err := state.Create(job); err != nil {
 		t.Fatal(err)
 	}
-	job, _, err = state.BindSession(job.JobID, "session-power", "turn-1", strings.Repeat("a", 64))
+	job, _, err = state.BindSession(job.JobID, "session-power", "turn-1", root, strings.Repeat("a", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,6 +386,11 @@ func testComponents(t *testing.T) (*pluginstate.Store, *pluginapi.Service, *Obse
 
 func observeTool(t *testing.T, observer *Observer, sessionID, turnID, toolUseID, tool string, input json.RawMessage, result pluginapi.Result) {
 	t.Helper()
+	observeToolAtWorkspace(t, observer, sessionID, turnID, toolUseID, tool, "", input, result)
+}
+
+func observeToolAtWorkspace(t *testing.T, observer *Observer, sessionID, turnID, toolUseID, tool, workspace string, input json.RawMessage, result pluginapi.Result) {
+	t.Helper()
 	response, err := json.Marshal(map[string]any{
 		"content":           []map[string]any{{"type": "text", "text": result.Text}},
 		"structuredContent": result.Structured,
@@ -239,6 +402,7 @@ func observeTool(t *testing.T, observer *Observer, sessionID, turnID, toolUseID,
 	payload, err := json.Marshal(map[string]any{
 		"session_id":      sessionID,
 		"turn_id":         turnID,
+		"cwd":             workspace,
 		"hook_event_name": "PostToolUse",
 		"tool_name":       "mcp__done_then__" + tool,
 		"tool_use_id":     toolUseID,

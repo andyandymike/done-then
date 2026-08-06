@@ -50,8 +50,10 @@ cross-builds for all six published OS/architecture pairs.
 
 ## 3. Manual Windows power acceptance
 
-This section intentionally reaches the real Windows shutdown backend. It has
-two separate cases: countdown/cancel and completed power-off/reconciliation.
+This section intentionally reaches the real Windows shutdown backend. Backend
+acceptance has two separate cases: countdown/cancel and completed
+power-off/reconciliation. The current-task plugin path has an additional
+after-stop acceptance case below.
 Run either case
 only with explicit authorization on a non-critical Windows test machine. Close
 important work first and ensure no unrelated shutdown or restart is pending.
@@ -109,7 +111,24 @@ starting the machine again, run:
 - [ ] Platform evidence justifies `ACTION_EXECUTED_CONFIRMED`; otherwise the
       result remains `ACTION_EXECUTION_UNVERIFIED` and the capability does not
       advance.
-- [ ] A separate current-task Plugin execute run is completed before claiming C5.
+- [ ] A separate current-task Plugin after-stop execute run is completed before
+      claiming C5.
+
+For the plugin-path case, install the reviewed artifact through the development
+or release plugin workflow, open a new Codex task, inspect and trust the exact
+DoneThen Hooks, then explicitly request an `after_stop` execute job with a
+five-minute delay. The prompt must acknowledge that Stop is not proof of task
+success. Record the returned job ID.
+
+- [ ] `PostToolUse(arm)` bound the expected session, turn, and workspace.
+- [ ] A normal `Stop` with `stop_hook_active=false` advanced the same job.
+- [ ] The detached supervisor scheduled a five-minute countdown only after that
+      Stop.
+- [ ] Sending a new prompt during one run cancelled the countdown and the
+      machine stayed on.
+- [ ] A separate authorized run powered off and reconciled without retrying the
+      action after boot.
+- [ ] Other user, project, managed, and plugin Hook definitions were unchanged.
 
 If any observation is ambiguous, run the following emergency cancellation and
 do not publish the release:
