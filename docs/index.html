@@ -1,19 +1,19 @@
 ---
 layout: default
 title: DoneThen
-description: Open-source, cancellable shutdown automation that starts when an armed Codex turn stops.
+description: Open-source, fail-closed shutdown automation for Codex Stop lifecycle events.
 home: true
 ---
 
 <section class="hero">
   <div class="container-inner hero-grid">
     <div class="hero-copy">
-      <p class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span> Codex stops · countdown starts</p>
-      <h1>Shut down your PC<br>when Codex<br><em>stops.</em></h1>
+      <p class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span> Codex Stop · explicit authority · safe recovery</p>
+      <h1>Shutdown after<br>Codex stops—<br><em>fail closed.</em></h1>
       <p class="hero-lede">
-        DoneThen is an open-source Codex plugin that turns an explicitly armed
-        turn ending into a cancellable shutdown countdown. No watcher window,
-        no second Codex run.
+        DoneThen is an open-source Codex plugin for observing one task—or a
+        barrier of several tasks—before a future cancellable shutdown. Today,
+        dry-run works and real Stop-based power authority is deliberately off.
       </p>
       <div class="hero-actions">
         <a class="button button--primary" href="#safety-model">See the handoff</a>
@@ -21,7 +21,7 @@ home: true
       </div>
       <div class="hero-truth">
         <span class="status-lamp status-lamp--hold" aria-hidden="true"></span>
-        <p><strong>Pre-alpha preview.</strong> Windows and Linux execute paths exist, but real cancel and power-off release acceptance are still pending.</p>
+        <p><strong>Pre-alpha, safe by default.</strong> Windows and Linux backend code exists; public Stop-based execute is disabled until trusted final Hook arbitration is available.</p>
       </div>
     </div>
 
@@ -29,15 +29,15 @@ home: true
       <div class="interlock-head">
         <div>
           <p class="panel-kicker">Lifecycle trace / after_stop</p>
-          <h2 id="interlock-title">Cancellable shutdown handoff</h2>
+          <h2 id="interlock-title">Authority before action</h2>
         </div>
-        <span class="mode-badge">execute: preview</span>
+        <span class="mode-badge">execute: fail-closed</span>
       </div>
 
       <div class="scenario-selector" role="group" aria-label="Completion scenario">
-        <button type="button" class="scenario-button is-active" data-scenario="stopped" aria-pressed="true">Stop observed</button>
+        <button type="button" class="scenario-button is-active" data-scenario="stopped" aria-pressed="true">Dry-run Stop</button>
         <button type="button" class="scenario-button" data-scenario="continued" aria-pressed="false">Prompt sent</button>
-        <button type="button" class="scenario-button" data-scenario="unsupported" aria-pressed="false">Unsupported OS</button>
+        <button type="button" class="scenario-button" data-scenario="unsupported" aria-pressed="false">Execute requested</button>
       </div>
 
       <ol class="gate-list" aria-live="polite">
@@ -58,8 +58,8 @@ home: true
         </li>
         <li class="gate-row is-hold" data-gate="countdown">
           <span class="gate-index">04</span>
-          <span class="gate-copy"><strong>Shutdown countdown</strong><small>minimum 120 seconds · cancellable</small></span>
-          <span class="gate-state">active</span>
+          <span class="gate-copy"><strong>Power authority</strong><small>dry-run never crosses this boundary</small></span>
+          <span class="gate-state">off</span>
         </li>
       </ol>
 
@@ -67,10 +67,10 @@ home: true
         <span class="result-mark" aria-hidden="true"></span>
         <div>
           <p class="result-label">Decision</p>
-          <strong data-result-title>Countdown is active</strong>
-          <span data-result-detail>A new prompt in this task or explicit cancel keeps the machine on.</span>
+          <strong data-result-title>Lifecycle recorded</strong>
+          <span data-result-detail>The Stop is observable evidence only; no power backend was called.</span>
         </div>
-        <code data-result-code>ACTION_SCHEDULED</code>
+        <code data-result-code>DRY_RUN_COMPLETE</code>
       </div>
     </section>
   </div>
@@ -78,8 +78,9 @@ home: true
 
 <section class="truth-strip" aria-label="Project guarantees">
   <div class="container-inner truth-strip-inner">
-    <span><i aria-hidden="true"></i> Two-minute cancel window</span>
+    <span><i aria-hidden="true"></i> Power calls disabled by default</span>
     <span><i aria-hidden="true"></i> No second watcher window</span>
+    <span><i aria-hidden="true"></i> Multi-session Stop barrier</span>
     <span><i aria-hidden="true"></i> Existing hooks preserved</span>
     <span><i aria-hidden="true"></i> Prompts are not persisted</span>
   </div>
@@ -93,7 +94,7 @@ home: true
     </div>
     <div class="problem-copy">
       <p class="lead-copy">An agent can stop because the work is finished. It can also stop while reporting a failed check, asking a question, or handing back partial work.</p>
-      <p>DoneThen does not pretend to know the difference in its default mode. It requires you to accept that exact lifecycle rule, then gives you at least two minutes to cancel.</p>
+      <p>DoneThen does not pretend to know the difference. It also does not treat one Hook process as the host's final decision. Without trusted final arbitration, execute stays unavailable and dry-run records only what was observed.</p>
     </div>
   </div>
 
@@ -109,9 +110,9 @@ home: true
       <p>The arm Hook binds the job to the current session, turn, and workspace. A Stop-Hook continuation cancels instead of widening the grant.</p>
     </article>
     <article class="principle">
-      <span class="principle-index">03 / CANCEL</span>
-      <h3>The countdown remains recoverable.</h3>
-      <p>The Hook only records lifecycle state. A detached supervisor owns the receipt, and a later prompt in the same task or explicit cancel asks the platform backend to abort.</p>
+      <span class="principle-index">03 / AUTHORITY</span>
+      <h3>Observation cannot grant power.</h3>
+      <p>The Hook only records lifecycle state. Schedule remains unreachable until a trusted provider can prove the final decision for the exact Stop event and the recovery path is ready.</p>
     </article>
   </div>
 </section>
@@ -139,8 +140,8 @@ home: true
       </li>
       <li>
         <span class="lifecycle-number">03</span>
-        <div><strong>Wait</strong><small>Detached supervisor stays outside the Hook</small></div>
-        <code>supervise</code>
+        <div><strong>Wait</strong><small>Lifecycle observer stays neutral</small></div>
+        <code>hook observer</code>
       </li>
       <li>
         <span class="lifecycle-number">04</span>
@@ -149,8 +150,8 @@ home: true
       </li>
       <li>
         <span class="lifecycle-number">05</span>
-        <div><strong>Countdown</strong><small>Platform receipt remains cancellable</small></div>
-        <code>action.scheduled</code>
+        <div><strong>Gate</strong><small>Dry-run completes; execute fails closed today</small></div>
+        <code>execute_ready=false</code>
       </li>
     </ol>
   </div>
@@ -161,7 +162,7 @@ home: true
     <div class="section-heading">
       <p class="eyebrow">What exists today</p>
       <h2>Implemented without overstating support.</h2>
-      <p>The default after-stop path can request execute on Windows and systemd Linux. It remains preview software: real cancel and power-off acceptance has not been completed.</p>
+      <p>Single-session and multi-session Stop dry-runs are implemented. Platform recognition, backend preflight, and execute readiness are reported separately; no public policy is currently execute-ready.</p>
       <a class="text-link" href="{{ '/plugin-development.html' | relative_url }}">Read the plugin development guide <span aria-hidden="true">→</span></a>
     </div>
 
@@ -169,11 +170,12 @@ home: true
       <div class="ledger-group">
         <p class="ledger-title"><span class="status-lamp status-lamp--pass" aria-hidden="true"></span> Implemented</p>
         <ul>
-          <li>Default <code>after_stop</code> arm plus <code>cancel</code> and <code>status</code></li>
+          <li><code>after_stop</code> and 2-16 target <code>after_all_stop</code> dry-run barriers</li>
           <li>Session, turn, and workspace binding with continuation cancellation</li>
           <li>Atomic job state and redacted lifecycle event logs</li>
           <li>Non-interfering plugin-owned lifecycle observers</li>
-          <li>Detached one-shot supervisor with monitored, cancellable countdown</li>
+          <li>Supervisor final gate that rejects Stop execution without trusted arbitration</li>
+          <li>Create-once recovery records independent of mutable plugin job JSON</li>
           <li>Separate experimental verified-success and App Server evidence path</li>
           <li>Fixed verifier profiles, receipts, cancellation, and reconciliation</li>
           <li>Windows backend and Linux systemd helper code</li>
@@ -184,19 +186,20 @@ home: true
         <p class="ledger-title"><span class="status-lamp status-lamp--hold" aria-hidden="true"></span> Not yet accepted or delivered</p>
         <ul>
           <li>Real Windows and Linux cancel/power-off release evidence</li>
+          <li>Trusted final Stop arbitration provider and proof lifecycle</li>
           <li>Verified-success execute and authoritative App Server attachment</li>
           <li>Published signed release artifacts</li>
           <li>A signed/notarized macOS power helper</li>
         </ul>
       </div>
-      <div class="ledger-group">
-        <p class="ledger-title"><span class="status-lamp status-lamp--hold" aria-hidden="true"></span> Published capability manifest</p>
+      <details class="ledger-group ledger-group--disclosure">
+        <summary class="ledger-title"><span class="status-lamp status-lamp--hold" aria-hidden="true"></span> Published capability manifest</summary>
         <ul>
           {% for platform in site.data.capabilities.platforms %}
           <li><code>{{ platform[0] }}</code> · {{ platform[1].level }} — {{ platform[1].statement }}</li>
           {% endfor %}
         </ul>
-      </div>
+      </details>
     </div>
   </div>
 </section>

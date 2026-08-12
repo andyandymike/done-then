@@ -166,7 +166,7 @@ func TestPublicMCPRejectsVerifiedSuccessExecuteEvenWithInstalledPolicy(t *testin
 	if !ok || !strings.Contains(fmt.Sprint(textContent["text"]), "same-host") {
 		t.Fatalf("execute rejection did not explain the authority boundary: %#v", content)
 	}
-	if backend.PreflightCalls != 0 || backend.ScheduleCalls != 0 || backend.CancelCalls != 0 {
+	if backend.PreflightCalls != 1 || backend.ScheduleCalls != 0 || backend.CancelCalls != 0 {
 		t.Fatalf("public MCP reached the power backend: %#v", backend)
 	}
 }
@@ -223,7 +223,7 @@ func TestStatusAndCancelRecoverObserveOnlyPluginJob(t *testing.T) {
 	}
 }
 
-func TestCancelPersistsPluginActionIntentRequestUntilSchedulerSettles(t *testing.T) {
+func TestCancelSettlesLegacyPluginActionIntentWithPositiveBackendEvidence(t *testing.T) {
 	root := t.TempDir()
 	state, err := pluginstate.New(root)
 	if err != nil {
@@ -255,22 +255,26 @@ func TestCancelPersistsPluginActionIntentRequestUntilSchedulerSettles(t *testing
 	if err := state.Create(job); err != nil {
 		t.Fatal(err)
 	}
+	job, _, err = state.BindSession(job.JobID, job.SessionID, job.ArmTurnID, root, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
 	backend := &actions.FakeBackend{}
 	deps := testDependencies(root, backend, nil)
 	var stdout, stderr bytes.Buffer
 	exitCode := runWithDependencies(context.Background(), []string{"cancel", job.JobID}, IO{
 		Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
 	}, deps)
-	if exitCode != 0 || !strings.Contains(stdout.String(), "unresolved scheduler boundary") {
+	if exitCode != 0 || !strings.Contains(stdout.String(), "confirmed inert") {
 		t.Fatalf("cancel exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
 	}
 	updated, err := state.Load(job.JobID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.State != pluginstate.StateActionIntent || !updated.CancelRequested ||
+	if updated.State != pluginstate.StateCancelled || !updated.CancelRequested ||
 		updated.CancelReason != "cli_cancelled_by_user" || updated.CancelResult == nil {
-		t.Fatalf("unresolved cancelled intent = %#v", updated)
+		t.Fatalf("settled cancelled intent = %#v", updated)
 	}
 	_, cancelCalls, _, _ := backend.Snapshot()
 	if cancelCalls != 1 {
@@ -300,12 +304,194 @@ func TestDoctorIsReadOnlyAtPowerBoundary(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if !report.ExecuteAvailable || !report.AfterStopExecuteAvailable || report.VerifiedSuccessExecuteAvailable {
+	if report.ExecuteAvailable || report.AfterStopExecuteAvailable || report.AfterAllStopExecuteAvailable ||
+		report.VerifiedSuccessExecuteAvailable || report.StopArbitrationAvailable {
 		t.Fatalf("doctor capability split = %#v", report)
+	}
+	if !report.BackendPreflightByPolicy["after_stop"] || report.ExecuteReadyByPolicy["after_stop"] ||
+		report.UnavailableReasonsByPolicy["after_stop"] != "stop_arbitration_unavailable" {
+		t.Fatalf("doctor policy readiness = %#v", report)
 	}
 	scheduleCalls, cancelCalls, _, _ := backend.Snapshot()
 	if scheduleCalls != 0 || cancelCalls != 0 || backend.ReconcileCalls != 0 || backend.PreflightCalls != 1 {
 		t.Fatalf("doctor backend calls: preflight=%d schedule=%d cancel=%d reconcile=%d", backend.PreflightCalls, scheduleCalls, cancelCalls, backend.ReconcileCalls)
+	}
+}
+
+func TestCancelWorkerHandlesSingleSessionRevocationAndNeverSchedules(t *testing.T) {
+	root := t.TempDir()
+	state, err := pluginstate.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	job := pluginstate.Job{
+		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
+		State: pluginstate.StateArmPendingBind, ReasonCode: "awaiting_post_tool_hook", Action: "shutdown",
+		TriggerPolicy: pluginstate.TriggerAfterStop, StopWithoutSuccessAck: true, DelaySeconds: 120,
+		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, Generation: 1,
+		VerifierProfile: "none", HookCompatibility: "not_evaluated", WorkspaceCWD: root,
+	}
+	if err := state.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	job, _, err = state.BindSession(job.JobID, "worker-session", "turn-1", root, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &actions.FakeBackend{}
+	request := actions.PowerRequest{
+		JobID: job.JobID, Action: "shutdown", Delay: 2 * time.Minute,
+		Comment: "test", RequestedAt: now,
+	}
+	capabilities, err := backend.Preflight(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := actions.BuildIntentReceipt(job.JobID, job.Action, now, request.Delay, capabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := receipt.Deadline.UTC()
+	job, _, err = state.UpdateJob(job.JobID, "test.scheduled", "", func(current *pluginstate.Job, _ time.Time) error {
+		current.State = pluginstate.StateActionScheduled
+		current.ReasonCode = "action_scheduled"
+		current.ActionIntentAt = &now
+		current.ScheduledFor = &deadline
+		current.PowerCapabilities = &capabilities
+		current.PowerReceipt = &receipt
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, needed, err := state.CreateRevocationMarker(
+		"worker-session", "turn-2", strings.Repeat("b", 64), "new_prompt_requested_power_cancel",
+		job.JobID, pluginstate.ObservedBindingID(job),
+	)
+	if err != nil || !needed || marker.JobID != job.JobID {
+		t.Fatalf("revocation marker = %#v needed=%t err=%v", marker, needed, err)
+	}
+	deps := testDependencies(root, backend, nil)
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies(context.Background(), []string{
+		"cancel-worker", job.JobID, pluginstate.ObservedBindingID(job), "new_prompt_requested_power_cancel",
+	}, IO{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr}, deps)
+	if exitCode != 0 {
+		t.Fatalf("cancel worker exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	updated, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != pluginstate.StateCancelled || updated.CancelResult == nil {
+		t.Fatalf("cancel worker result = %#v", updated)
+	}
+	if _, pending, err := state.PendingRevocation(job.JobID); err != nil || pending {
+		t.Fatalf("pending revocation after cancellation: pending=%t err=%v", pending, err)
+	}
+	scheduleCalls, cancelCalls, _, _ := backend.Snapshot()
+	if scheduleCalls != 0 || cancelCalls != 1 {
+		t.Fatalf("cancel-only worker backend calls: schedule=%d cancel=%d", scheduleCalls, cancelCalls)
+	}
+}
+
+func TestCancelWorkerResolvesPreCallRecoveryWithoutCallingBackend(t *testing.T) {
+	root := t.TempDir()
+	state, err := pluginstate.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	job := pluginstate.Job{
+		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
+		State: pluginstate.StateStopObserved, ReasonCode: "after_stop_observed_awaiting_countdown", Action: "shutdown",
+		TriggerPolicy: pluginstate.TriggerAfterStop, StopWithoutSuccessAck: true, DelaySeconds: 120,
+		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, Generation: 1,
+		SessionID: "pre-call-session", ArmTurnID: "turn-1", CurrentTurnID: "turn-1", StopTurnID: "turn-1",
+		VerifierProfile: "none", HookCompatibility: "session_bound", ArmObserved: true, WorkspaceCWD: root,
+	}
+	if err := state.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	job, _, err = state.BindSession(job.JobID, "pre-call-session", "turn-1", root, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &actions.FakeBackend{}
+	request := actions.PowerRequest{JobID: job.JobID, Action: job.Action, Delay: 2 * time.Minute, Comment: "test", RequestedAt: now}
+	capabilities, err := backend.Preflight(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, err := actions.BuildIntentReceipt(job.JobID, job.Action, now, request.Delay, capabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.PersistRecoveryEnvelope(job, intent, now); err != nil {
+		t.Fatal(err)
+	}
+	deadline := intent.Deadline.UTC()
+	job, _, err = state.UpdateJob(job.JobID, "test.intent", "", func(current *pluginstate.Job, _ time.Time) error {
+		current.State = pluginstate.StateActionIntent
+		current.ReasonCode = "action_intent_recorded"
+		current.ActionIntentAt = &now
+		current.ScheduledFor = &deadline
+		current.PowerCapabilities = &capabilities
+		current.PowerReceipt = &intent
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := state.CreateRevocationMarker(
+		job.SessionID, "turn-2", strings.Repeat("c", 64), "new_prompt_requested_power_cancel",
+		job.JobID, pluginstate.ObservedBindingID(job),
+	); err != nil {
+		t.Fatal(err)
+	}
+	deps := testDependencies(root, backend, nil)
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDependencies(context.Background(), []string{
+		"cancel-worker", job.JobID, pluginstate.ObservedBindingID(job), "new_prompt_requested_power_cancel",
+	}, IO{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr}, deps)
+	if exitCode != 0 {
+		t.Fatalf("cancel worker exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
+	}
+	updated, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority, err := state.LoadRecoveryAuthority(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != pluginstate.StateCancelled || authority.Resolution == nil ||
+		authority.Resolution.Outcome != "no_action" || authority.Call != nil {
+		t.Fatalf("pre-call settlement job=%#v authority=%#v", updated, authority)
+	}
+	scheduleCalls, cancelCalls, _, _ := backend.Snapshot()
+	if scheduleCalls != 0 || cancelCalls != 0 {
+		t.Fatalf("pre-call settlement crossed backend: schedule=%d cancel=%d", scheduleCalls, cancelCalls)
+	}
+	if err := os.WriteFile(filepath.Join(state.Root(), "jobs", job.JobID+".json"), []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if exitCode := runWithDependencies(context.Background(), []string{"status", job.JobID}, IO{
+		Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
+	}, deps); exitCode != 0 || !strings.Contains(stdout.String(), "independent recovery authority") ||
+		!strings.Contains(stdout.String(), "RESOLVED") {
+		t.Fatalf("recovery-only status exit=%d stdout=%q stderr=%q", exitCode, stdout.String(), stderr.String())
 	}
 }
 

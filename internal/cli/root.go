@@ -52,6 +52,8 @@ func runWithDependencies(ctx context.Context, args []string, streams IO, deps de
 		return hookCommand(args[1:], streams, deps)
 	case "supervise":
 		return superviseCommand(ctx, args[1:], streams, deps)
+	case "cancel-worker":
+		return cancelWorkerCommand(ctx, args[1:], streams, deps)
 	case "cancel":
 		return cancelCommand(ctx, args[1:], streams, deps)
 	case "status":

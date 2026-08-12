@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"runtime"
+	"time"
 
+	"github.com/andyandymike/done-then/internal/actions"
 	"github.com/andyandymike/done-then/internal/mcpserver"
 	"github.com/andyandymike/done-then/internal/pluginapi"
 	"github.com/andyandymike/done-then/internal/pluginpower"
@@ -34,15 +36,39 @@ func mcpCommand(ctx context.Context, args []string, streams IO, deps dependencie
 		return runtimeError(streams.Stderr, supervisor.ExitStateError, "resolve plugin workspace", err)
 	}
 	backend := deps.newActionBackend()
-	afterStopAvailable := runtime.GOOS == "windows" || runtime.GOOS == "linux"
-	afterStopUnavailableReason := "after-stop execute is currently supported only on Windows and systemd Linux"
+	backendSupported := runtime.GOOS == "windows" || runtime.GOOS == "linux"
+	backendPreflightPassed := false
+	if backendSupported {
+		probe := actions.PowerRequest{
+			JobID: "dt_mcp_capability_probe", Action: "shutdown", Delay: 2 * time.Minute,
+			Comment: "DoneThen capability probe", RequestedAt: time.Now().UTC(),
+		}
+		capabilities, preflightErr := backend.Preflight(ctx, probe)
+		backendPreflightPassed = preflightErr == nil && capabilities.ExecuteSupported
+	}
+	stopUnavailableReason := "stop_arbitration_unavailable: Codex Stop observation is not a final global hook-arbitration receipt; Stop-based execute remains disabled"
+	verifiedUnavailableReason := "verified_success_authority_unavailable: verified-success execute requires validated local policy and a trusted same-host authority attachment"
 	options := pluginapi.Options{
-		AfterStopExecuteAvailable:         afterStopAvailable,
-		AfterStopExecuteUnavailableReason: afterStopUnavailableReason,
-		ExecuteUnavailableReason:          "verified-success execute is disabled until Codex provides a verified same-host App Server attachment",
-		Workspace:                         workspace,
-		Launcher:                          pluginpower.Launcher{DataRoot: root},
-		Backend:                           backend,
+		PolicyCapabilities: map[pluginstate.TriggerPolicy]pluginapi.PolicyCapability{
+			pluginstate.TriggerAfterStop: {
+				BuildSupported: true, BackendSupported: backendSupported,
+				BackendPreflightPassed: backendPreflightPassed, ExecuteReady: false,
+				UnavailableReason: stopUnavailableReason,
+			},
+			pluginstate.TriggerAfterAllStop: {
+				BuildSupported: true, BackendSupported: backendSupported,
+				BackendPreflightPassed: backendPreflightPassed, ExecuteReady: false,
+				UnavailableReason: stopUnavailableReason,
+			},
+			pluginstate.TriggerVerifiedSuccess: {
+				BuildSupported: true, BackendSupported: backendSupported,
+				BackendPreflightPassed: backendPreflightPassed, ExecuteReady: false,
+				UnavailableReason: verifiedUnavailableReason,
+			},
+		},
+		Workspace: workspace,
+		Launcher:  pluginpower.Launcher{DataRoot: root},
+		Backend:   backend,
 	}
 	service, err := pluginapi.NewWithOptions(state, options)
 	if err != nil {

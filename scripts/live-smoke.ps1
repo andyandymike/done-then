@@ -629,7 +629,7 @@ $report = [ordered]@{
     event_count                = $events.Count
     event_sequence_observed    = $eventSequenceObserved
     power_action_event_count   = $powerActionEventCount
-    after_stop_execute_available_expected = $true
+    after_stop_execute_available_expected = $false
     failures                   = @($failures)
 }
 ConvertTo-StableJson -Value $report

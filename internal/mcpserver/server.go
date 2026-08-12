@@ -171,7 +171,7 @@ func (s *Server) initialize(raw json.RawMessage) (map[string]any, error) {
 			"name":    "done-then",
 			"version": s.version,
 		},
-		"instructions": "DoneThen defaults to after_stop: an explicitly acknowledged, session-bound Stop can start a cancellable shutdown countdown without claiming task success. verified_success remains a separate strict mode and may be unavailable.",
+		"instructions": "DoneThen defaults to after_stop dry-run. after_all_stop creates one fail-closed observation barrier across 2-16 explicit session ids. Neither Stop policy claims task success, and public Stop-based execute remains unavailable until trusted final Hook arbitration exists. verified_success is separate and also unavailable for public execute.",
 	}, nil
 }
 
@@ -232,7 +232,7 @@ func tools() []tool {
 		{
 			Name:        "arm",
 			Title:       "Arm DoneThen",
-			Description: "Create a time-limited one-shot shutdown grant. after_stop is the default observable trigger and intentionally does not mean task success; execute requires explicit acknowledgement and a cancellable delay.",
+			Description: "Create a time-limited one-shot lifecycle grant. after_stop observes one session; after_all_stop waits for every explicitly listed target session. Stop intentionally does not mean task success. Dry-run is available; execute is accepted only when the returned per-policy readiness says a trusted authority path is ready.",
 			InputSchema: map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
@@ -242,12 +242,21 @@ func tools() []tool {
 				"properties": map[string]any{
 					"action": map[string]any{"type": "string", "const": "shutdown"},
 					"trigger_policy": map[string]any{
-						"type": "string", "enum": []string{"after_stop", "verified_success"},
-						"description": "Use after_stop unless the user explicitly requests the experimental semantic completion gate",
+						"type": "string", "enum": []string{"after_stop", "after_all_stop", "verified_success"},
+						"description": "Use after_all_stop only when the user explicitly supplies 2-16 target session ids; neither Stop policy proves success",
 					},
 					"acknowledge_stop_without_success": map[string]any{
 						"type":        "boolean",
-						"description": "Must be true for after_stop execute; acknowledges that a normal Stop after partial, blocked, or question-ending work can trigger the countdown",
+						"description": "Must be true for after_stop or after_all_stop execute; acknowledges that a normal Stop after partial, blocked, or question-ending work can trigger the countdown",
+					},
+					"target_session_ids": map[string]any{
+						"type": "array", "minItems": 2, "maxItems": 16, "uniqueItems": true,
+						"items":       map[string]any{"type": "string", "minLength": 1, "maxLength": 1024},
+						"description": "after_all_stop only: exact opaque Codex session ids in user-supplied order",
+					},
+					"acknowledge_barrier_across_turns": map[string]any{
+						"type":        "boolean",
+						"description": "after_all_stop execute only: acknowledges that a target which resumes before countdown remains pending until a later Stop",
 					},
 					"delay_seconds":      map[string]any{"type": "integer", "minimum": 30, "maximum": 3600},
 					"expires_in_seconds": map[string]any{"type": "integer", "minimum": 60, "maximum": 86400},

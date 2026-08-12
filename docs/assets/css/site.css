@@ -985,6 +985,29 @@ button:disabled,
   color: var(--safe);
 }
 
+.ledger-group--disclosure > summary {
+  min-height: 44px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.ledger-group--disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.ledger-group--disclosure > summary::after {
+  margin-left: auto;
+  color: var(--text-faint);
+  font: 500 10px/1 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  content: "View matrix +";
+}
+
+.ledger-group--disclosure[open] > summary::after {
+  content: "Hide matrix −";
+}
+
 .ledger-group--hold .ledger-title {
   color: var(--signal);
 }
@@ -1541,6 +1564,10 @@ button:disabled,
     background-size: 44px 44px;
   }
 
+  .section {
+    padding: 68px 0;
+  }
+
   .hero {
     padding-top: 54px;
   }
@@ -1635,6 +1662,40 @@ button:disabled,
 
   .section-heading h2 {
     font-size: clamp(2.4rem, 12vw, 3.35rem);
+  }
+
+  .problem-grid,
+  .flow-intro,
+  .status-grid,
+  .build-grid {
+    gap: 34px;
+  }
+
+  .principle-list {
+    margin-top: 48px;
+  }
+
+  .principle,
+  .principle:first-child,
+  .principle:last-child {
+    padding-block: 22px 26px;
+  }
+
+  .principle h3 {
+    margin-top: 22px;
+  }
+
+  .lifecycle {
+    margin-top: 44px;
+  }
+
+  .ledger-group {
+    padding: 21px 0 26px;
+  }
+
+  .ledger-group ul {
+    gap: 8px;
+    margin-top: 18px;
   }
 
   .lifecycle li {

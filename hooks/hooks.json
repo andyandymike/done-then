@@ -1,5 +1,5 @@
 {
-  "description": "Bind DoneThen grants to the current session, observe Stop, and cancel safely on later activity without steering Codex.",
+  "description": "Bind DoneThen controller grants, observe single-session and multi-session Stop targets, and cancel safely on later activity without steering Codex.",
   "hooks": {
     "PostToolUse": [
       {

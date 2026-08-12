@@ -67,3 +67,20 @@ func TestServerNegotiatesListsToolsAndRejectsExecute(t *testing.T) {
 		t.Fatalf("execute rejection jobs = %#v, %v", jobs, err)
 	}
 }
+
+func TestArmSchemaPublishesMultiSessionBarrierInputs(t *testing.T) {
+	listed := tools()
+	arm := listed[0]
+	properties := arm.InputSchema["properties"].(map[string]any)
+	trigger := properties["trigger_policy"].(map[string]any)
+	enum := trigger["enum"].([]string)
+	found := false
+	for _, value := range enum {
+		if value == "after_all_stop" {
+			found = true
+		}
+	}
+	if !found || properties["target_session_ids"] == nil || properties["acknowledge_barrier_across_turns"] == nil {
+		t.Fatalf("arm barrier schema = %#v", arm.InputSchema)
+	}
+}

@@ -10,17 +10,25 @@ import (
 	"github.com/andyandymike/done-then/internal/actions"
 )
 
-const CurrentSchemaVersion = "3"
+const CurrentSchemaVersion = "4"
+
+const (
+	MinimumStopTargets      = 2
+	MaximumStopTargets      = 16
+	MaximumBarrierEventKeys = 4096
+	MaximumLegacyEventKeys  = 128
+)
 
 type TriggerPolicy string
 
 const (
 	TriggerAfterStop       TriggerPolicy = "after_stop"
+	TriggerAfterAllStop    TriggerPolicy = "after_all_stop"
 	TriggerVerifiedSuccess TriggerPolicy = "verified_success"
 )
 
 func (p TriggerPolicy) Valid() bool {
-	return p == TriggerAfterStop || p == TriggerVerifiedSuccess
+	return p == TriggerAfterStop || p == TriggerAfterAllStop || p == TriggerVerifiedSuccess
 }
 
 type State string
@@ -67,57 +75,115 @@ func (s State) IsTerminal() bool {
 	}
 }
 
+type StopTarget struct {
+	SessionHash          string     `json:"session_hash"`
+	WorkspaceCWD         string     `json:"workspace_cwd,omitempty"`
+	CurrentTurnHash      string     `json:"current_turn_hash,omitempty"`
+	StopTurnHash         string     `json:"stop_turn_hash,omitempty"`
+	ContinuationTurnHash string     `json:"continuation_turn_hash,omitempty"`
+	FirstSeenAt          *time.Time `json:"first_seen_at,omitempty"`
+	StopObservedAt       *time.Time `json:"stop_observed_at,omitempty"`
+}
+
+func (t StopTarget) Stopped() bool {
+	return t.CurrentTurnHash != "" && t.StopTurnHash == t.CurrentTurnHash && t.ContinuationTurnHash == ""
+}
+
 func (s State) IsActive() bool {
 	return !s.IsTerminal()
 }
 
 type Job struct {
-	SchemaVersion          string                   `json:"schema_version"`
-	JobID                  string                   `json:"job_id"`
-	NonceHash              string                   `json:"nonce_hash"`
-	State                  State                    `json:"state"`
-	ReasonCode             string                   `json:"reason_code,omitempty"`
-	DryRun                 bool                     `json:"dry_run"`
-	Action                 string                   `json:"action"`
-	TriggerPolicy          TriggerPolicy            `json:"trigger_policy"`
-	StopWithoutSuccessAck  bool                     `json:"stop_without_success_acknowledged"`
-	DelaySeconds           int64                    `json:"delay_seconds"`
-	ExpiresAt              time.Time                `json:"expires_at"`
-	CreatedAt              time.Time                `json:"created_at"`
-	UpdatedAt              time.Time                `json:"updated_at"`
-	SessionID              string                   `json:"session_id,omitempty"`
-	ArmTurnID              string                   `json:"arm_turn_id,omitempty"`
-	CurrentTurnID          string                   `json:"current_turn_id,omitempty"`
-	ReadyTurnID            string                   `json:"ready_turn_id,omitempty"`
-	StopTurnID             string                   `json:"stop_turn_id,omitempty"`
-	Generation             uint64                   `json:"generation"`
-	CompletionStatus       string                   `json:"completion_status,omitempty"`
-	CompletionEvidenceHash string                   `json:"completion_evidence_hash,omitempty"`
-	VerifierProfile        string                   `json:"verifier_profile"`
-	AllowAgentOnlySuccess  bool                     `json:"allow_agent_only_success"`
-	HookCompatibility      string                   `json:"hook_compatibility"`
-	ArmObserved            bool                     `json:"arm_observed"`
-	FinishObserved         bool                     `json:"finish_observed"`
-	ProcessedEventKeys     []string                 `json:"processed_event_keys,omitempty"`
-	WorkspaceCWD           string                   `json:"workspace_cwd,omitempty"`
-	PowerPolicyFingerprint string                   `json:"power_policy_fingerprint,omitempty"`
-	SupervisorPID          int                      `json:"supervisor_pid,omitempty"`
-	VerifierFingerprint    string                   `json:"verifier_fingerprint,omitempty"`
-	VerifierPassed         bool                     `json:"verifier_passed"`
-	VerifierExitCode       *int                     `json:"verifier_exit_code,omitempty"`
-	HookFingerprintH1      string                   `json:"hook_fingerprint_h1,omitempty"`
-	HookFingerprintH2      string                   `json:"hook_fingerprint_h2,omitempty"`
-	HookFingerprintH3      string                   `json:"hook_fingerprint_h3,omitempty"`
-	HostSnapshotReason     string                   `json:"host_snapshot_reason,omitempty"`
-	HostInstanceID         string                   `json:"host_instance_id,omitempty"`
-	ActionIntentAt         *time.Time               `json:"action_intent_at,omitempty"`
-	ScheduledFor           *time.Time               `json:"scheduled_for,omitempty"`
-	PowerCapabilities      *actions.Capabilities    `json:"power_capabilities,omitempty"`
-	PowerReceipt           *actions.Receipt         `json:"power_receipt,omitempty"`
-	CancelResult           *actions.CancelResult    `json:"cancel_result,omitempty"`
-	CancelRequested        bool                     `json:"cancel_requested"`
-	CancelReason           string                   `json:"cancel_reason,omitempty"`
-	ReconcileResult        *actions.ReconcileResult `json:"reconcile_result,omitempty"`
+	SchemaVersion               string                   `json:"schema_version"`
+	JobID                       string                   `json:"job_id"`
+	NonceHash                   string                   `json:"nonce_hash"`
+	State                       State                    `json:"state"`
+	ReasonCode                  string                   `json:"reason_code,omitempty"`
+	DryRun                      bool                     `json:"dry_run"`
+	Action                      string                   `json:"action"`
+	TriggerPolicy               TriggerPolicy            `json:"trigger_policy"`
+	StopWithoutSuccessAck       bool                     `json:"stop_without_success_acknowledged"`
+	DelaySeconds                int64                    `json:"delay_seconds"`
+	ExpiresAt                   time.Time                `json:"expires_at"`
+	CreatedAt                   time.Time                `json:"created_at"`
+	UpdatedAt                   time.Time                `json:"updated_at"`
+	SessionID                   string                   `json:"session_id,omitempty"`
+	ArmTurnID                   string                   `json:"arm_turn_id,omitempty"`
+	CurrentTurnID               string                   `json:"current_turn_id,omitempty"`
+	ReadyTurnID                 string                   `json:"ready_turn_id,omitempty"`
+	StopTurnID                  string                   `json:"stop_turn_id,omitempty"`
+	Generation                  uint64                   `json:"generation"`
+	CompletionStatus            string                   `json:"completion_status,omitempty"`
+	CompletionEvidenceHash      string                   `json:"completion_evidence_hash,omitempty"`
+	VerifierProfile             string                   `json:"verifier_profile"`
+	AllowAgentOnlySuccess       bool                     `json:"allow_agent_only_success"`
+	HookCompatibility           string                   `json:"hook_compatibility"`
+	ArmObserved                 bool                     `json:"arm_observed"`
+	FinishObserved              bool                     `json:"finish_observed"`
+	ProcessedEventKeys          []string                 `json:"processed_event_keys,omitempty"`
+	WorkspaceCWD                string                   `json:"workspace_cwd,omitempty"`
+	PowerPolicyFingerprint      string                   `json:"power_policy_fingerprint,omitempty"`
+	SupervisorPID               int                      `json:"supervisor_pid,omitempty"`
+	VerifierFingerprint         string                   `json:"verifier_fingerprint,omitempty"`
+	VerifierPassed              bool                     `json:"verifier_passed"`
+	VerifierExitCode            *int                     `json:"verifier_exit_code,omitempty"`
+	HookFingerprintH1           string                   `json:"hook_fingerprint_h1,omitempty"`
+	HookFingerprintH2           string                   `json:"hook_fingerprint_h2,omitempty"`
+	HookFingerprintH3           string                   `json:"hook_fingerprint_h3,omitempty"`
+	HostSnapshotReason          string                   `json:"host_snapshot_reason,omitempty"`
+	HostInstanceID              string                   `json:"host_instance_id,omitempty"`
+	ActionIntentAt              *time.Time               `json:"action_intent_at,omitempty"`
+	ScheduledFor                *time.Time               `json:"scheduled_for,omitempty"`
+	PowerCapabilities           *actions.Capabilities    `json:"power_capabilities,omitempty"`
+	PowerReceipt                *actions.Receipt         `json:"power_receipt,omitempty"`
+	CancelResult                *actions.CancelResult    `json:"cancel_result,omitempty"`
+	CancelRequested             bool                     `json:"cancel_requested"`
+	CancelReason                string                   `json:"cancel_reason,omitempty"`
+	ReconcileResult             *actions.ReconcileResult `json:"reconcile_result,omitempty"`
+	ControllerSessionHash       string                   `json:"controller_session_hash,omitempty"`
+	ControllerArmTurnHash       string                   `json:"controller_arm_turn_hash,omitempty"`
+	StopTargets                 []StopTarget             `json:"stop_targets,omitempty"`
+	TargetReservationsCommitted bool                     `json:"target_reservations_committed"`
+	TargetIndexesReady          bool                     `json:"target_indexes_ready"`
+	TargetBindingID             string                   `json:"target_binding_id,omitempty"`
+	BarrierAcrossTurnsAck       bool                     `json:"barrier_across_turns_acknowledged"`
+}
+
+func (j Job) IsStopBarrier() bool {
+	return j.TriggerPolicy == TriggerAfterAllStop
+}
+
+func (j Job) BarrierSatisfied() bool {
+	if len(j.StopTargets) < MinimumStopTargets || len(j.StopTargets) > MaximumStopTargets {
+		return false
+	}
+	for _, target := range j.StopTargets {
+		if !target.Stopped() {
+			return false
+		}
+	}
+	return true
+}
+
+func (j Job) BarrierProgress() (stopped, unseen int) {
+	for _, target := range j.StopTargets {
+		if target.Stopped() {
+			stopped++
+		}
+		if target.FirstSeenAt == nil {
+			unseen++
+		}
+	}
+	return stopped, unseen
+}
+
+func (j *Job) StopTarget(sessionHash string) (*StopTarget, bool) {
+	for index := range j.StopTargets {
+		if j.StopTargets[index].SessionHash == sessionHash {
+			return &j.StopTargets[index], true
+		}
+	}
+	return nil, false
 }
 
 func (j Job) Expired(now time.Time) bool {
@@ -203,9 +269,12 @@ func Validate(job Job) error {
 		if !filepath.IsAbs(job.WorkspaceCWD) {
 			return errors.New("execute plugin job requires an absolute workspace")
 		}
-		if job.TriggerPolicy == TriggerAfterStop {
+		if job.TriggerPolicy == TriggerAfterStop || job.TriggerPolicy == TriggerAfterAllStop {
 			if !job.StopWithoutSuccessAck {
-				return errors.New("after-stop execute job requires explicit stop-without-success acknowledgement")
+				return errors.New("observable-stop execute job requires explicit stop-without-success acknowledgement")
+			}
+			if job.TriggerPolicy == TriggerAfterAllStop && !job.BarrierAcrossTurnsAck {
+				return errors.New("after-all-stop execute job requires explicit cross-turn acknowledgement")
 			}
 		} else {
 			if job.VerifierProfile == "none" && !job.AllowAgentOnlySuccess {
@@ -216,31 +285,50 @@ func Validate(job Job) error {
 			}
 		}
 	}
-	if job.TriggerPolicy == TriggerAfterStop {
+	if job.TriggerPolicy == TriggerAfterStop || job.TriggerPolicy == TriggerAfterAllStop {
 		if job.VerifierProfile != "none" || job.AllowAgentOnlySuccess {
-			return errors.New("after-stop job cannot use semantic completion verification")
+			return errors.New("observable-stop job cannot use semantic completion verification")
 		}
 		if job.PowerPolicyFingerprint != "" {
-			return errors.New("after-stop job cannot carry a verified-success power policy")
+			return errors.New("observable-stop job cannot carry a verified-success power policy")
 		}
 	} else if job.StopWithoutSuccessAck {
 		return errors.New("verified-success job cannot acknowledge after-stop semantics")
 	}
-	if job.State == StateArmPendingBind {
-		if job.SessionID != "" || job.ArmTurnID != "" || job.ArmObserved {
-			return errors.New("pending plugin job cannot already be bound")
+	if job.TriggerPolicy == TriggerAfterAllStop {
+		if err := validateStopBarrier(job); err != nil {
+			return err
 		}
-	} else if job.State.IsActive() {
-		if job.SessionID == "" || job.ArmTurnID == "" || !job.ArmObserved {
-			return errors.New("active plugin job is missing its hook binding")
+	} else {
+		if job.BarrierAcrossTurnsAck || job.ControllerSessionHash != "" || job.ControllerArmTurnHash != "" ||
+			len(job.StopTargets) != 0 || job.TargetReservationsCommitted || job.TargetIndexesReady || job.TargetBindingID != "" {
+			return errors.New("non-barrier job carries multi-session barrier state")
+		}
+		if job.State == StateArmPendingBind {
+			if job.SessionID != "" || job.ArmTurnID != "" || job.ArmObserved {
+				return errors.New("pending plugin job cannot already be bound")
+			}
+		} else if job.State.IsActive() {
+			if job.SessionID == "" || job.ArmTurnID == "" || !job.ArmObserved {
+				return errors.New("active plugin job is missing its hook binding")
+			}
 		}
 	}
 	if job.TriggerPolicy == TriggerVerifiedSuccess && (job.State == StateReadyPendingStop || job.State == StateStopObserved) &&
 		(job.ReadyTurnID == "" || job.CompletionEvidenceHash == "") {
 		return errors.New("ready plugin job is missing completion evidence")
 	}
-	if job.State == StateStopObserved && job.StopTurnID == "" {
-		return errors.New("stop-observed plugin job is missing the stop turn")
+	if job.State == StateStopObserved {
+		if job.TriggerPolicy == TriggerAfterAllStop {
+			if !job.BarrierSatisfied() {
+				return errors.New("stop-observed barrier job is not satisfied")
+			}
+		} else if job.StopTurnID == "" {
+			return errors.New("stop-observed plugin job is missing the stop turn")
+		}
+	}
+	if job.State == StateDryRunComplete && job.TriggerPolicy == TriggerAfterAllStop && !job.BarrierSatisfied() {
+		return errors.New("completed dry-run barrier job is not satisfied")
 	}
 	if job.VerifierPassed && job.VerifierProfile != "none" && job.VerifierFingerprint == "" {
 		return errors.New("verified plugin job is missing its verifier fingerprint")
@@ -266,15 +354,113 @@ func Validate(job Job) error {
 			return errors.New("scheduled plugin job is missing its power receipt")
 		}
 	}
-	if len(job.ProcessedEventKeys) > maxProcessedEventKeys {
-		return fmt.Errorf("plugin job has more than %d event keys", maxProcessedEventKeys)
+	maximumEventKeys := MaximumLegacyEventKeys
+	if job.TriggerPolicy == TriggerAfterAllStop {
+		maximumEventKeys = MaximumBarrierEventKeys
+	}
+	if len(job.ProcessedEventKeys) > maximumEventKeys {
+		return fmt.Errorf("plugin job has more than %d event keys", maximumEventKeys)
 	}
 	for _, key := range job.ProcessedEventKeys {
-		if len(key) != 64 {
+		if !ValidIdentityHash(key) {
 			return errors.New("invalid processed event key")
 		}
 	}
 	return nil
+}
+
+func validateStopBarrier(job Job) error {
+	if job.SessionID != "" || job.ArmTurnID != "" || job.CurrentTurnID != "" || job.StopTurnID != "" {
+		return errors.New("after-all-stop job cannot persist raw session or turn bindings")
+	}
+	if len(job.StopTargets) < MinimumStopTargets || len(job.StopTargets) > MaximumStopTargets {
+		return fmt.Errorf("after-all-stop job must contain %d to %d targets", MinimumStopTargets, MaximumStopTargets)
+	}
+	if err := ValidateJobID(job.TargetBindingID); err != nil {
+		return fmt.Errorf("invalid target binding identity: %w", err)
+	}
+	if job.TargetIndexesReady && !job.TargetReservationsCommitted {
+		return errors.New("barrier target indexes cannot be ready before reservations commit")
+	}
+	seen := make(map[string]bool, len(job.StopTargets))
+	for _, target := range job.StopTargets {
+		if !ValidIdentityHash(target.SessionHash) {
+			return errors.New("barrier target has an invalid session hash")
+		}
+		if seen[target.SessionHash] {
+			return errors.New("barrier target session hashes must be unique")
+		}
+		seen[target.SessionHash] = true
+		if target.WorkspaceCWD != "" && !filepath.IsAbs(target.WorkspaceCWD) {
+			return errors.New("barrier target workspace must be absolute")
+		}
+		for _, turnHash := range []string{target.CurrentTurnHash, target.StopTurnHash, target.ContinuationTurnHash} {
+			if turnHash != "" && !ValidIdentityHash(turnHash) {
+				return errors.New("barrier target has an invalid turn hash")
+			}
+		}
+		if target.FirstSeenAt != nil && target.FirstSeenAt.IsZero() {
+			return errors.New("barrier target first-seen timestamp is invalid")
+		}
+		if target.StopObservedAt != nil && target.StopObservedAt.IsZero() {
+			return errors.New("barrier target stop timestamp is invalid")
+		}
+		if target.CurrentTurnHash == "" {
+			if target.WorkspaceCWD != "" || target.FirstSeenAt != nil || target.StopTurnHash != "" ||
+				target.ContinuationTurnHash != "" || target.StopObservedAt != nil {
+				return errors.New("unseen barrier target carries observed state")
+			}
+			continue
+		}
+		if target.WorkspaceCWD == "" || target.FirstSeenAt == nil {
+			return errors.New("observed barrier target is missing workspace or timestamp")
+		}
+		if target.StopTurnHash != "" && target.StopTurnHash != target.CurrentTurnHash {
+			return errors.New("barrier target stop turn does not match its current turn")
+		}
+		if target.ContinuationTurnHash != "" && target.ContinuationTurnHash != target.CurrentTurnHash {
+			return errors.New("barrier target continuation does not match its current turn")
+		}
+		if target.StopTurnHash != "" && target.ContinuationTurnHash != "" {
+			return errors.New("barrier target cannot be stopped and continued on the same turn")
+		}
+		if (target.StopObservedAt != nil) != target.Stopped() {
+			return errors.New("barrier target stop timestamp does not match stopped state")
+		}
+	}
+	if job.ControllerSessionHash != "" && !ValidIdentityHash(job.ControllerSessionHash) {
+		return errors.New("barrier controller session hash is invalid")
+	}
+	if job.ControllerArmTurnHash != "" && !ValidIdentityHash(job.ControllerArmTurnHash) {
+		return errors.New("barrier controller turn hash is invalid")
+	}
+	if (job.ControllerSessionHash == "") != (job.ControllerArmTurnHash == "") {
+		return errors.New("barrier controller binding is incomplete")
+	}
+	if job.State == StateArmPendingBind {
+		if job.ControllerSessionHash != "" || job.ControllerArmTurnHash != "" || job.ArmObserved || job.TargetIndexesReady {
+			return errors.New("pending barrier job cannot already be controller-bound")
+		}
+	} else if job.State.IsActive() {
+		if job.ControllerSessionHash == "" || job.ControllerArmTurnHash == "" || !job.ArmObserved ||
+			!job.TargetReservationsCommitted || !job.TargetIndexesReady {
+			return errors.New("active barrier job is missing its complete hook binding")
+		}
+	}
+	return nil
+}
+
+func ValidIdentityHash(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func ValidateJobID(jobID string) error {

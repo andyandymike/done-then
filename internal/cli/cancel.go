@@ -40,10 +40,16 @@ func cancelCommand(ctx context.Context, args []string, streams IO, deps dependen
 			return cancelSupervisorJob(ctx, job, streams, deps, jobStore)
 		}
 		if !errors.Is(loadErr, os.ErrNotExist) {
+			if authority, recoveryErr := pluginStore.LoadRecoveryAuthority(args[0]); recoveryErr == nil {
+				return cancelPluginRecoveryAuthority(ctx, authority, streams, deps, pluginStore)
+			}
 			return runtimeError(streams.Stderr, supervisor.ExitStateError, "load job", loadErr)
 		}
 		pluginJob, pluginErr := pluginStore.Load(args[0])
 		if pluginErr != nil {
+			if authority, recoveryErr := pluginStore.LoadRecoveryAuthority(args[0]); recoveryErr == nil {
+				return cancelPluginRecoveryAuthority(ctx, authority, streams, deps, pluginStore)
+			}
 			return runtimeError(streams.Stderr, supervisor.ExitStateError, "load job", pluginErr)
 		}
 		return cancelPluginJob(ctx, pluginJob, streams, deps, pluginStore)
@@ -83,6 +89,39 @@ func cancelCommand(ctx context.Context, args []string, streams IO, deps dependen
 	default:
 		return runtimeError(streams.Stderr, supervisor.ExitUsage, "select job", fmt.Errorf("multiple active jobs; specify one of: %s", strings.Join(ids, ", ")))
 	}
+}
+
+func cancelPluginRecoveryAuthority(ctx context.Context, authority pluginstate.RecoveryAuthority, streams IO, deps dependencies, pluginStore *pluginstate.Store) int {
+	lock, err := deps.acquirePowerLock()
+	if err != nil {
+		return runtimeError(streams.Stderr, supervisor.ExitStateError, "acquire recovery cancellation fence", err)
+	}
+	defer lock.Release()
+	authority, err = pluginStore.LoadRecoveryAuthority(authority.Envelope.JobID)
+	if err != nil {
+		return runtimeError(streams.Stderr, supervisor.ExitStateError, "reload plugin recovery authority", err)
+	}
+	if authority.Resolution != nil {
+		fmt.Fprintf(streams.Stdout, "[DoneThen] Recovery authority for plugin job %s is already resolved as %s.\n", authority.Envelope.JobID, authority.Resolution.Outcome)
+		return 0
+	}
+	if authority.Call == nil {
+		if _, err := pluginStore.PersistRecoveryResolution(authority.Envelope.JobID, "no_action", "cli_recovered_before_schedule_call", nil, time.Now().UTC()); err != nil {
+			return runtimeError(streams.Stderr, supervisor.ExitStateError, "persist pre-call recovery resolution", err)
+		}
+		fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s had no durable schedule-call start; it was resolved without calling the power backend.\n", authority.Envelope.JobID)
+		return 0
+	}
+	receipt := authority.CancellationReceipt()
+	result, cancelErr := deps.newActionBackend().Cancel(ctx, receipt)
+	if cancelErr != nil && !errors.Is(cancelErr, actions.ErrNoShutdownInProgress) {
+		return runtimeError(streams.Stderr, supervisor.ExitActionFailed, "cancel from plugin recovery authority", cancelErr)
+	}
+	if _, err := pluginStore.PersistRecoveryResolution(authority.Envelope.JobID, "cancelled", "cli_recovered_without_job_projection", &result, time.Now().UTC()); err != nil {
+		return runtimeError(streams.Stderr, supervisor.ExitStateError, "persist recovery cancellation resolution", err)
+	}
+	fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s cancellation was confirmed from its independent recovery authority (scope=%s).\n", authority.Envelope.JobID, result.Scope)
+	return 0
 }
 
 func cancelSupervisorJob(ctx context.Context, job supervisor.Job, streams IO, deps dependencies, jobStore *store.Store) int {
@@ -192,7 +231,6 @@ func cancelPluginJob(ctx context.Context, job pluginstate.Job, streams IO, deps 
 		fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s is already cancelled.\n", job.JobID)
 		return 0
 	}
-	intentAtRequest := job.State == pluginstate.StateActionIntent
 	unresolvedPower := pluginstate.HasUnresolvedPowerAction(job)
 	if job.State.IsTerminal() && !unresolvedPower {
 		fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s is already in terminal state %s; no action is active.\n", job.JobID, job.State)
@@ -213,26 +251,34 @@ func cancelPluginJob(ctx context.Context, job pluginstate.Job, streams IO, deps 
 		if err != nil {
 			return runtimeError(streams.Stderr, supervisor.ExitStateError, "persist plugin cancellation request", err)
 		}
-		receipt, receiptErr := pluginstate.RecoveryReceipt(job)
-		if receiptErr != nil {
-			return runtimeError(streams.Stderr, supervisor.ExitStateError, "recover plugin cancellation receipt", receiptErr)
+		powerLock, lockErr := deps.acquirePowerLock()
+		if lockErr != nil {
+			return runtimeError(streams.Stderr, supervisor.ExitStateError, "acquire plugin cancellation fence after persisting the request", lockErr)
 		}
-		result, cancelErr := deps.newActionBackend().Cancel(ctx, receipt)
-		cancelResult = &result
-		if cancelErr != nil && !errors.Is(cancelErr, actions.ErrNoShutdownInProgress) {
-			fmt.Fprintf(streams.Stderr, "[DoneThen] Plugin cancellation was not confirmed by the power backend: %v. Retry immediately.\n", cancelErr)
+		settlement, settleErr := settlePluginPowerLocked(ctx, pluginStore, job, deps.newActionBackend(), "cli_cancelled_by_user")
+		if settleErr != nil {
+			_ = powerLock.Release()
+			fmt.Fprintf(streams.Stderr, "[DoneThen] Plugin cancellation remains recovery-required: %v. Retry immediately.\n", settleErr)
 			return supervisor.ExitActionFailed
 		}
+		updated, persistErr := persistPluginPowerSettlement(pluginStore, job.JobID, "cli.cancel.settled", "cli_cancelled_by_user", settlement)
+		releaseErr := powerLock.Release()
+		if persistErr != nil {
+			return runtimeError(streams.Stderr, supervisor.ExitStateError, "persist settled plugin cancellation", persistErr)
+		}
+		if releaseErr != nil {
+			return runtimeError(streams.Stderr, supervisor.ExitStateError, "release plugin cancellation fence", releaseErr)
+		}
+		cancelResult = settlement.Result
+		if settlement.Outcome == "no_action" {
+			fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s cancelled before the power backend was called.\n", updated.JobID)
+		} else {
+			fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s cancelled; the countdown was confirmed inert (scope=%s).\n", updated.JobID, cancelResult.Scope)
+		}
+		return 0
 	}
 	updated, _, err := pluginStore.UpdateJob(job.JobID, "cli.cancel", "", func(job *pluginstate.Job, _ time.Time) error {
 		if job.State.IsTerminal() && !pluginstate.HasUnresolvedPowerAction(*job) {
-			return nil
-		}
-		if intentAtRequest && pluginstate.HasUnresolvedPowerAction(*job) {
-			job.CancelRequested = true
-			job.CancelReason = "cli_cancelled_by_user"
-			job.ReasonCode = "cancel_requested_pending_scheduler_settlement"
-			job.CancelResult = cancelResult
 			return nil
 		}
 		job.Generation++
@@ -250,10 +296,6 @@ func cancelPluginJob(ctx context.Context, job pluginstate.Job, streams IO, deps 
 	})
 	if err != nil {
 		return runtimeError(streams.Stderr, supervisor.ExitStateError, "cancel plugin job", err)
-	}
-	if intentAtRequest && pluginstate.HasUnresolvedPowerAction(updated) {
-		fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s has a persisted cancellation request at an unresolved scheduler boundary; retry status/cancel until the supervisor settles it.\n", updated.JobID)
-		return 0
 	}
 	if updated.State != pluginstate.StateCancelled {
 		fmt.Fprintf(streams.Stdout, "[DoneThen] Plugin job %s became terminal in state %s; no action is active.\n", updated.JobID, updated.State)

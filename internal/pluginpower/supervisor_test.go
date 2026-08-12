@@ -3,6 +3,7 @@ package pluginpower
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,6 +47,18 @@ type fakeLock struct{}
 
 func (fakeLock) Release() error { return nil }
 
+type fixedStopArbitration struct{ err error }
+
+func (a fixedStopArbitration) ValidateFinalStop(context.Context, pluginstate.Job) error {
+	return a.err
+}
+
+type fixedVerifiedAuthorization struct{ err error }
+
+func (a fixedVerifiedAuthorization) ValidateVerifiedSuccess(context.Context, pluginstate.Job) error {
+	return a.err
+}
+
 func TestSupervisorSchedulesOnlyAfterStableReadyHostSnapshots(t *testing.T) {
 	root := t.TempDir()
 	state, job := stoppedExecuteJob(t, root)
@@ -67,7 +80,7 @@ func TestSupervisorSchedulesOnlyAfterStableReadyHostSnapshots(t *testing.T) {
 	}
 }
 
-func TestAfterStopSupervisorSchedulesWithoutAppServerOrCompletionEvidence(t *testing.T) {
+func TestAfterStopSupervisorSchedulesWithTrustedFinalArbitration(t *testing.T) {
 	root := t.TempDir()
 	state, err := pluginstate.New(root)
 	if err != nil {
@@ -92,7 +105,7 @@ func TestAfterStopSupervisorSchedulesWithoutAppServerOrCompletionEvidence(t *tes
 	}
 	backend := &actions.FakeBackend{}
 	worker, err := NewSupervisor(SupervisorConfig{
-		Store: state, Backend: backend,
+		Store: state, Backend: backend, StopArbitration: fixedStopArbitration{},
 		AcquireLock:         func() (platform.PowerLock, error) { return fakeLock{}, nil },
 		UnresolvedPowerJobs: func(string) ([]string, error) { return nil, nil },
 		PollInterval:        time.Millisecond,
@@ -123,6 +136,192 @@ func TestAfterStopSupervisorSchedulesWithoutAppServerOrCompletionEvidence(t *tes
 	scheduleCalls, cancelCalls, delay, comment := backend.Snapshot()
 	if scheduleCalls != 1 || cancelCalls != 0 || delay != 2*time.Minute || !strings.Contains(comment, "Codex stopped") {
 		t.Fatalf("backend schedule=%d cancel=%d delay=%s comment=%q", scheduleCalls, cancelCalls, delay, comment)
+	}
+}
+
+func TestAfterStopSupervisorFailsClosedWithoutFinalArbitration(t *testing.T) {
+	root := t.TempDir()
+	state, err := pluginstate.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	job := pluginstate.Job{
+		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
+		State: pluginstate.StateStopObserved, ReasonCode: "after_stop_observed_awaiting_countdown",
+		Action: "shutdown", TriggerPolicy: pluginstate.TriggerAfterStop, StopWithoutSuccessAck: true,
+		DelaySeconds: 120, ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
+		SessionID: "thread-no-arbitration", ArmTurnID: "turn-1", CurrentTurnID: "turn-1", StopTurnID: "turn-1",
+		Generation: 1, VerifierProfile: "none", HookCompatibility: "session_bound", ArmObserved: true,
+		WorkspaceCWD: filepath.Clean(root), SupervisorPID: 4242,
+	}
+	if err := state.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	backend := &actions.FakeBackend{}
+	worker, err := NewSupervisor(SupervisorConfig{
+		Store: state, Backend: backend,
+		AcquireLock:         func() (platform.PowerLock, error) { return fakeLock{}, nil },
+		UnresolvedPowerJobs: func(string) ([]string, error) { return nil, nil },
+		PollInterval:        time.Millisecond, Quiescence: time.Millisecond, ProcessID: 4242,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Run(context.Background(), job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != pluginstate.StateHookUnavailable || updated.ReasonCode != "stop_arbitration_unavailable" {
+		t.Fatalf("missing arbitration job = %#v", updated)
+	}
+	scheduleCalls, cancelCalls, _, _ := backend.Snapshot()
+	if scheduleCalls != 0 || cancelCalls != 0 {
+		t.Fatalf("missing arbitration reached backend: schedule=%d cancel=%d", scheduleCalls, cancelCalls)
+	}
+}
+
+func TestVerifiedSuccessSupervisorFailsClosedWithoutIndependentExecutionGrant(t *testing.T) {
+	root := t.TempDir()
+	state, job := stoppedExecuteJob(t, root)
+	backend := &actions.FakeBackend{}
+	worker := newTestSupervisor(t, root, state, backend, readySnapshot(job, "sha256:hooks"))
+	worker.config.VerifiedAuthorization = nil
+	if err := worker.Run(context.Background(), job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != pluginstate.StatePrivilegeUnavailable || updated.ReasonCode != "verified_success_authority_unavailable" {
+		t.Fatalf("missing verified-success grant job = %#v", updated)
+	}
+	scheduleCalls, cancelCalls, _, _ := backend.Snapshot()
+	if scheduleCalls != 0 || cancelCalls != 0 {
+		t.Fatalf("missing verified-success grant reached backend: schedule=%d cancel=%d", scheduleCalls, cancelCalls)
+	}
+}
+
+func TestAfterAllStopSupervisorSchedulesExactlyOnceWithTrustedFinalArbitration(t *testing.T) {
+	root := t.TempDir()
+	state, job, targetIDs := stoppedBarrierExecuteJob(t, root)
+	backend := &actions.FakeBackend{}
+	baseNow := time.Now().UTC()
+	worker, err := NewSupervisor(SupervisorConfig{
+		Store: state, Backend: backend, StopArbitration: fixedStopArbitration{},
+		AcquireLock:         func() (platform.PowerLock, error) { return fakeLock{}, nil },
+		UnresolvedPowerJobs: func(string) ([]string, error) { return nil, nil },
+		PollInterval:        time.Millisecond, Quiescence: time.Millisecond, ProcessID: 4242,
+		Now: func() time.Time {
+			scheduleCalls, _, _, _ := backend.Snapshot()
+			if scheduleCalls > 0 {
+				return baseNow.Add(2*time.Minute + time.Second)
+			}
+			return baseNow
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Run(context.Background(), job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != pluginstate.StateActionScheduled || updated.PowerReceipt == nil {
+		t.Fatalf("scheduled barrier = %#v", updated)
+	}
+	scheduleCalls, cancelCalls, _, _ := backend.Snapshot()
+	if scheduleCalls != 1 || cancelCalls != 0 {
+		t.Fatalf("barrier backend schedule=%d cancel=%d targets=%v", scheduleCalls, cancelCalls, targetIDs)
+	}
+}
+
+func TestAfterAllStopSupervisorRejectsChangedTargetIndex(t *testing.T) {
+	root := t.TempDir()
+	state, job, targetIDs := stoppedBarrierExecuteJob(t, root)
+	indexPath := filepath.Join(state.Root(), "sessions", identity.SHA256([]byte(targetIDs[0]))+".json")
+	if err := os.Remove(indexPath); err != nil {
+		t.Fatal(err)
+	}
+	backend := &actions.FakeBackend{}
+	worker, err := NewSupervisor(SupervisorConfig{
+		Store: state, Backend: backend, StopArbitration: fixedStopArbitration{},
+		AcquireLock:         func() (platform.PowerLock, error) { return fakeLock{}, nil },
+		UnresolvedPowerJobs: func(string) ([]string, error) { return nil, nil },
+		PollInterval:        time.Millisecond, Quiescence: time.Millisecond, ProcessID: 4242,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Run(context.Background(), job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != pluginstate.StateHookUnavailable || updated.ReasonCode != "target_index_changed" {
+		t.Fatalf("changed target index = %#v", updated)
+	}
+	scheduleCalls, _, _, _ := backend.Snapshot()
+	if scheduleCalls != 0 {
+		t.Fatalf("changed target index scheduled %d actions", scheduleCalls)
+	}
+}
+
+func TestAfterAllStopResumeDuringScheduleCancelsReceiptBoundAction(t *testing.T) {
+	root := t.TempDir()
+	state, job, targetIDs := stoppedBarrierExecuteJob(t, root)
+	backend := &callbackBackend{FakeBackend: &actions.FakeBackend{}}
+	backend.afterSchedule = func() {
+		_, _, _, err := state.UpdateObservedSession(targetIDs[0], "turn-2", "test.target_resumed", strings.Repeat("d", 64), func(current *pluginstate.Job, target *pluginstate.StopTarget, _ time.Time) error {
+			current.Generation++
+			target.CurrentTurnHash = identity.SHA256([]byte("turn-2"))
+			target.StopTurnHash = ""
+			target.StopObservedAt = nil
+			current.CancelRequested = true
+			current.CancelReason = "after_all_stop_target_resumed"
+			current.ReasonCode = "after_all_stop_target_resumed"
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("resume barrier target: %v", err)
+		}
+	}
+	worker, err := NewSupervisor(SupervisorConfig{
+		Store: state, Backend: backend, StopArbitration: fixedStopArbitration{},
+		AcquireLock:         func() (platform.PowerLock, error) { return fakeLock{}, nil },
+		UnresolvedPowerJobs: func(string) ([]string, error) { return nil, nil },
+		PollInterval:        time.Millisecond, Quiescence: time.Millisecond, ProcessID: 4242,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Run(context.Background(), job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != pluginstate.StateCancelled || updated.CancelResult == nil ||
+		!strings.HasPrefix(updated.ReasonCode, "countdown_cancelled:") {
+		t.Fatalf("resumed barrier cancellation = %#v", updated)
+	}
+	scheduleCalls, cancelCalls, _, _ := backend.Snapshot()
+	if scheduleCalls != 1 || cancelCalls != 1 {
+		t.Fatalf("resumed barrier backend schedule=%d cancel=%d", scheduleCalls, cancelCalls)
 	}
 }
 
@@ -272,7 +471,7 @@ func TestSupervisorCancelsScheduledCountdownWhenHostContinues(t *testing.T) {
 	}
 	worker, err := NewSupervisor(SupervisorConfig{
 		Store: state, Authority: &sequenceAuthority{snapshots: []hostauthority.Snapshot{ready, ready, continued}},
-		Backend: backend, Profiles: profiles,
+		Backend: backend, Profiles: profiles, VerifiedAuthorization: fixedVerifiedAuthorization{},
 		AcquireLock:              func() (platform.PowerLock, error) { return fakeLock{}, nil },
 		PolicyFingerprint:        "sha256:policy",
 		CurrentPolicyFingerprint: func() (string, error) { return "sha256:policy", nil },
@@ -310,7 +509,7 @@ func TestSupervisorCancelsScheduledCountdownWhenPolicyChanges(t *testing.T) {
 	}
 	worker, err := NewSupervisor(SupervisorConfig{
 		Store: state, Authority: fixedAuthority{snapshot: readySnapshot(job, "sha256:hooks")},
-		Backend: backend, Profiles: profiles,
+		Backend: backend, Profiles: profiles, VerifiedAuthorization: fixedVerifiedAuthorization{},
 		AcquireLock:       func() (platform.PowerLock, error) { return fakeLock{}, nil },
 		PolicyFingerprint: "sha256:policy",
 		CurrentPolicyFingerprint: func() (string, error) {
@@ -355,7 +554,7 @@ func TestSupervisorCancelsCountdownAfterExcessiveDeadlineLateness(t *testing.T) 
 	baseNow := time.Now().UTC()
 	worker, err := NewSupervisor(SupervisorConfig{
 		Store: state, Authority: fixedAuthority{snapshot: readySnapshot(job, "sha256:hooks")},
-		Backend: backend, Profiles: profiles,
+		Backend: backend, Profiles: profiles, VerifiedAuthorization: fixedVerifiedAuthorization{},
 		AcquireLock:              func() (platform.PowerLock, error) { return fakeLock{}, nil },
 		PolicyFingerprint:        "sha256:policy",
 		CurrentPolicyFingerprint: func() (string, error) { return "sha256:policy", nil },
@@ -454,6 +653,72 @@ func stoppedExecuteJob(t *testing.T, root string) (*pluginstate.Store, pluginsta
 	return state, job
 }
 
+func stoppedBarrierExecuteJob(t *testing.T, root string) (*pluginstate.Store, pluginstate.Job, []string) {
+	t.Helper()
+	state, err := pluginstate.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetIDs := []string{"barrier-target-a", "barrier-target-b", "barrier-target-c"}
+	targets := make([]pluginstate.StopTarget, 0, len(targetIDs))
+	for _, sessionID := range targetIDs {
+		targets = append(targets, pluginstate.StopTarget{SessionHash: identity.SHA256([]byte(sessionID))})
+	}
+	now := time.Now().UTC()
+	job := pluginstate.Job{
+		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
+		State: pluginstate.StateArmPendingBind, ReasonCode: "awaiting_post_tool_hook", Action: "shutdown",
+		TriggerPolicy: pluginstate.TriggerAfterAllStop, StopWithoutSuccessAck: true, BarrierAcrossTurnsAck: true,
+		DelaySeconds: 120, ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
+		Generation: 1, VerifierProfile: "none", HookCompatibility: "not_evaluated", WorkspaceCWD: root,
+		SupervisorPID: 4242, TargetBindingID: bindingIdentity.JobID, StopTargets: targets,
+	}
+	job, err = state.CreateBarrierReservations(job, targetIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _, err = state.BindSession(job.JobID, "barrier-controller", "controller-turn", root, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, sessionID := range targetIDs {
+		eventKey := strings.Repeat(string(rune('b'+index)), 64)
+		job, _, _, err = state.UpdateObservedSession(sessionID, "turn-1", "test.barrier.stop", eventKey, func(current *pluginstate.Job, target *pluginstate.StopTarget, observedAt time.Time) error {
+			turnHash := identity.SHA256([]byte("turn-1"))
+			firstSeen := observedAt
+			target.WorkspaceCWD = root
+			target.FirstSeenAt = &firstSeen
+			target.CurrentTurnHash = turnHash
+			target.StopTurnHash = turnHash
+			target.StopObservedAt = &observedAt
+			current.Generation++
+			if current.BarrierSatisfied() {
+				current.State = pluginstate.StateStopObserved
+				current.ReasonCode = "after_all_stop_observed_awaiting_countdown"
+			} else {
+				current.State = pluginstate.StateArmed
+				current.ReasonCode = "after_all_stop_barrier_partial"
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if job.State != pluginstate.StateStopObserved {
+		t.Fatalf("stopped barrier fixture = %#v", job)
+	}
+	return state, job, targetIDs
+}
+
 func readySnapshot(job pluginstate.Job, fingerprint string) hostauthority.Snapshot {
 	target := hostauthority.Thread{
 		ID:     job.SessionID,
@@ -494,6 +759,7 @@ func newTestSupervisor(t *testing.T, root string, state *pluginstate.Store, back
 	worker, err := NewSupervisor(SupervisorConfig{
 		Store:                    state,
 		Authority:                fixedAuthority{snapshot: snapshot},
+		VerifiedAuthorization:    fixedVerifiedAuthorization{},
 		Backend:                  backend,
 		Profiles:                 profiles,
 		AcquireLock:              func() (platform.PowerLock, error) { return fakeLock{}, nil },

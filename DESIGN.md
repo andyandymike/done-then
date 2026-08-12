@@ -193,9 +193,10 @@ real system boundary.
 ## Components
 
 - **Wordmark:** text-only `DoneThen`, with a small pre-alpha status label.
-- **Handoff chain:** ordered arm, bind, Stop, countdown, and cancel states.
-- **Scenario selector:** normal Stop, continued conversation, and unsupported
-  platform outcomes, with the cancellation result shown explicitly.
+- **Authority chain:** ordered arm, bind, Stop observation, final-authority
+  gate, and future recovery states.
+- **Scenario selector:** dry-run Stop, continued conversation, and a rejected
+  execute request, with the fail-closed result shown explicitly.
 - **Command surface:** a real PowerShell snippet with copy support.
 - **Status strip:** short factual statements such as `OBSERVE-ONLY` and
   `FAIL-CLOSED`; never vanity statistics.
@@ -208,8 +209,8 @@ Do:
 
 - Lead with the user outcome—shut down after Codex stops—then immediately
   explain why a stopped turn is not proof of successful completion.
-- Keep the pre-alpha capability and minimum cancellation window visible in the
-  hero and interactive result.
+- Keep the pre-alpha capability and current `execute_ready=false` boundary
+  visible in the hero and interactive result.
 - Use sequence numbers only for genuine lifecycle order.
 - Respect keyboard focus, reduced motion, and narrow viewports.
 - Prefer precise product language over claims such as "revolutionary" or

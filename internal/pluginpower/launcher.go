@@ -57,6 +57,50 @@ func (l Launcher) Launch(jobID string) (int, error) {
 	return pid, nil
 }
 
+func (l Launcher) EnsureCancelWorker(jobID, bindingID, reason string) (int, error) {
+	if err := pluginstate.ValidateJobID(jobID); err != nil {
+		return 0, err
+	}
+	if err := pluginstate.ValidateJobID(bindingID); err != nil {
+		return 0, errors.New("invalid revocation binding identity")
+	}
+	if strings.TrimSpace(reason) == "" || len(reason) > 256 {
+		return 0, errors.New("invalid cancel-worker reason")
+	}
+	executable := l.Executable
+	if executable == "" {
+		resolved, err := os.Executable()
+		if err != nil {
+			return 0, fmt.Errorf("resolve DoneThen executable: %w", err)
+		}
+		executable = resolved
+	}
+	if !filepath.IsAbs(executable) {
+		return 0, errors.New("DoneThen cancel-worker executable must be absolute")
+	}
+	logDir := filepath.Join(l.DataRoot, "plugin", "logs")
+	if err := filetrust.EnsureOwnerControlledDirectory(logDir, "cancel-worker log directory"); err != nil {
+		return 0, err
+	}
+	logFile, err := filetrust.OpenAppendOwnerControlled(filepath.Join(logDir, jobID+".cancel-worker.log"), "cancel-worker log")
+	if err != nil {
+		return 0, err
+	}
+	defer logFile.Close()
+	command := exec.Command(executable, "cancel-worker", jobID, bindingID, reason)
+	configureDetached(command)
+	command.Env = supervisorEnvironment()
+	command.Stdin = nil
+	command.Stdout = logFile
+	command.Stderr = logFile
+	if err := command.Start(); err != nil {
+		return 0, fmt.Errorf("start cancel-only worker: %w", err)
+	}
+	pid := command.Process.Pid
+	_ = command.Process.Release()
+	return pid, nil
+}
+
 func supervisorEnvironment() []string {
 	keys := []string{"PATH", "HOME", "USERPROFILE", "CODEX_HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL"}
 	if runtime.GOOS == "windows" {

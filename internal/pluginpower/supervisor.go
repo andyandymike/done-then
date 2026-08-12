@@ -16,6 +16,8 @@ import (
 
 var errJobChanged = errors.New("plugin job changed during host inspection")
 var errAuthorityNotReady = errors.New("host authority has not observed the target yet")
+var ErrStopArbitrationUnavailable = errors.New("trusted final Stop arbitration is unavailable")
+var ErrVerifiedSuccessAuthorityUnavailable = errors.New("trusted verified-success execution authority is unavailable")
 var ErrIntentRecoveryRequired = errors.New("unresolved action intent requires manual cancel or reconcile")
 var ErrSupervisorOwnershipUnproven = errors.New("one-shot supervisor process identity does not match the armed job")
 
@@ -23,9 +25,25 @@ type Snapshotter interface {
 	Snapshot(ctx context.Context, targetThreadID, cwd string) (hostauthority.Snapshot, error)
 }
 
+// StopArbitrator validates a trusted host's final decision for the exact Stop
+// event(s) represented by a job. Hook observation and stop_hook_active=false
+// are not sufficient implementations of this interface.
+type StopArbitrator interface {
+	ValidateFinalStop(ctx context.Context, job pluginstate.Job) error
+}
+
+// VerifiedSuccessAuthorizer validates an independently issued, non-file-only
+// grant for a verified-success power attempt. Host snapshots and editable job
+// JSON are evidence inputs, not sufficient execution authority on their own.
+type VerifiedSuccessAuthorizer interface {
+	ValidateVerifiedSuccess(ctx context.Context, job pluginstate.Job) error
+}
+
 type SupervisorConfig struct {
 	Store                    *pluginstate.Store
 	Authority                Snapshotter
+	StopArbitration          StopArbitrator
+	VerifiedAuthorization    VerifiedSuccessAuthorizer
 	Backend                  actions.Backend
 	Profiles                 *verifierprofile.Registry
 	AcquireLock              func() (platform.PowerLock, error)
@@ -105,7 +123,7 @@ func (s *Supervisor) Run(ctx context.Context, jobID string) error {
 		if job.State == pluginstate.StateActionScheduled {
 			return s.monitorScheduled(ctx, job)
 		}
-		if job.TriggerPolicy == pluginstate.TriggerAfterStop {
+		if job.TriggerPolicy == pluginstate.TriggerAfterStop || job.TriggerPolicy == pluginstate.TriggerAfterAllStop {
 			if job.Expired(s.config.Now().UTC()) {
 				return s.fail(job, pluginstate.StateExpired, "arm_expired")
 			}
@@ -122,6 +140,9 @@ func (s *Supervisor) Run(ctx context.Context, jobID string) error {
 				return err
 			}
 			continue
+		}
+		if s.config.VerifiedAuthorization == nil {
+			return s.fail(job, pluginstate.StatePrivilegeUnavailable, "verified_success_authority_unavailable")
 		}
 		if !s.verifiedConfigReady() {
 			return s.fail(job, pluginstate.StateHostUnavailable, "verified_success_supervisor_configuration_unavailable")
@@ -305,10 +326,25 @@ func (s *Supervisor) schedule(ctx context.Context, jobID string) error {
 	if job.State != pluginstate.StateStopObserved {
 		return errJobChanged
 	}
+	if reason, pendingErr := s.pendingRevocationReason(job.JobID); pendingErr != nil {
+		return s.fail(job, pluginstate.StateHookUnavailable, reason)
+	}
+	if job.Expired(s.config.Now().UTC()) {
+		return s.fail(job, pluginstate.StateExpired, "arm_expired")
+	}
 	if job.TriggerPolicy == pluginstate.TriggerAfterStop {
 		if !job.StopWithoutSuccessAck || job.SessionID == "" || job.StopTurnID == "" || job.StopTurnID != job.CurrentTurnID {
 			return s.fail(job, pluginstate.StateHookUnavailable, "after_stop_binding_incomplete")
 		}
+	} else if job.TriggerPolicy == pluginstate.TriggerAfterAllStop {
+		validated, authorityErr := s.config.Store.BarrierAuthority(jobID)
+		if authorityErr != nil {
+			return s.fail(job, pluginstate.StateHookUnavailable, barrierAuthorityReason(authorityErr))
+		}
+		if validated.State != pluginstate.StateStopObserved {
+			return errJobChanged
+		}
+		job = validated
 	} else {
 		if job.HookFingerprintH3 == "" || job.HookFingerprintH1 != job.HookFingerprintH2 || job.HookFingerprintH2 != job.HookFingerprintH3 {
 			return errJobChanged
@@ -327,6 +363,14 @@ func (s *Supervisor) schedule(ctx context.Context, jobID string) error {
 		} else if !job.AllowAgentOnlySuccess {
 			return s.fail(job, pluginstate.StateVerificationFailed, "independent_evidence_required")
 		}
+		if authorityErr := s.validateVerifiedAuthorization(ctx, job); authorityErr != nil {
+			return s.fail(job, pluginstate.StatePrivilegeUnavailable, verifiedAuthorizationReason(authorityErr))
+		}
+	}
+	if isStopPolicy(job.TriggerPolicy) {
+		if authorityErr := s.validateStopArbitration(ctx, job); authorityErr != nil {
+			return s.fail(job, pluginstate.StateHookUnavailable, stopArbitrationReason(authorityErr))
+		}
 	}
 
 	if err := waitContext(ctx, s.config.Quiescence); err != nil {
@@ -338,6 +382,27 @@ func (s *Supervisor) schedule(ctx context.Context, jobID string) error {
 	}
 	if current.Generation != job.Generation || current.State != pluginstate.StateStopObserved {
 		return errJobChanged
+	}
+	if reason, pendingErr := s.pendingRevocationReason(current.JobID); pendingErr != nil {
+		return s.fail(current, pluginstate.StateHookUnavailable, reason)
+	}
+	if current.Expired(s.config.Now().UTC()) {
+		return s.fail(current, pluginstate.StateExpired, "arm_expired")
+	}
+	if current.TriggerPolicy == pluginstate.TriggerAfterAllStop {
+		validated, authorityErr := s.config.Store.BarrierAuthority(jobID)
+		if authorityErr != nil {
+			return s.fail(current, pluginstate.StateHookUnavailable, barrierAuthorityReason(authorityErr))
+		}
+		if validated.Generation != job.Generation || validated.State != pluginstate.StateStopObserved {
+			return errJobChanged
+		}
+		current = validated
+	}
+	if isStopPolicy(current.TriggerPolicy) {
+		if authorityErr := s.validateStopArbitration(ctx, current); authorityErr != nil {
+			return s.fail(current, pluginstate.StateHookUnavailable, stopArbitrationReason(authorityErr))
+		}
 	}
 	if current.TriggerPolicy == pluginstate.TriggerVerifiedSuccess {
 		finalSnapshot, snapshotErr := s.config.Authority.Snapshot(ctx, current.SessionID, current.WorkspaceCWD)
@@ -354,12 +419,15 @@ func (s *Supervisor) schedule(ctx context.Context, jobID string) error {
 		if !s.policyMatches(current) {
 			return s.fail(current, pluginstate.StatePrivilegeUnavailable, "power_policy_changed_at_final_gate")
 		}
+		if authorityErr := s.validateVerifiedAuthorization(ctx, current); authorityErr != nil {
+			return s.fail(current, pluginstate.StatePrivilegeUnavailable, verifiedAuthorizationReason(authorityErr))
+		}
 	}
 
 	now := s.config.Now().UTC()
 	delay := time.Duration(current.DelaySeconds) * time.Second
 	comment := actions.PluginPowerComment(current.JobID)
-	if current.TriggerPolicy == pluginstate.TriggerAfterStop {
+	if current.TriggerPolicy == pluginstate.TriggerAfterStop || current.TriggerPolicy == pluginstate.TriggerAfterAllStop {
 		comment = actions.AfterStopPowerComment(current.JobID)
 	}
 	request := actions.PowerRequest{
@@ -387,6 +455,10 @@ func (s *Supervisor) schedule(ctx context.Context, jobID string) error {
 	if err != nil {
 		return s.fail(current, pluginstate.StateActionFailed, "intent_recovery_receipt_failed")
 	}
+	recoveryEnvelope, err := s.config.Store.PersistRecoveryEnvelope(current, intentReceipt, now)
+	if err != nil {
+		return s.fail(current, pluginstate.StateActionFailed, "recovery_envelope_persist_failed")
+	}
 	intentDeadline := intentReceipt.Deadline.UTC()
 	intentGeneration := current.Generation
 	current, _, err = s.config.Store.UpdateJob(current.JobID, "power.intent", "", func(job *pluginstate.Job, _ time.Time) error {
@@ -412,11 +484,33 @@ func (s *Supervisor) schedule(ctx context.Context, jobID string) error {
 	if rechecked.State != pluginstate.StateActionIntent {
 		return errJobChanged
 	}
+	if reason, pendingErr := s.pendingRevocationReason(rechecked.JobID); pendingErr != nil {
+		return s.abortIntentBeforeSchedule(rechecked, reason)
+	}
 	if rechecked.CancelRequested {
-		return s.cancelPowerForReason(ctx, rechecked, intentReceipt, valueOrCancelReason(rechecked, "continuation_before_schedule"))
+		return s.abortIntentBeforeSchedule(rechecked, valueOrCancelReason(rechecked, "continuation_before_schedule"))
+	}
+	if rechecked.TriggerPolicy == pluginstate.TriggerAfterAllStop {
+		if _, authorityErr := s.config.Store.BarrierAuthority(rechecked.JobID); authorityErr != nil {
+			return s.abortIntentBeforeSchedule(rechecked, barrierAuthorityReason(authorityErr))
+		}
+	}
+	if isStopPolicy(rechecked.TriggerPolicy) {
+		if authorityErr := s.validateStopArbitration(ctx, rechecked); authorityErr != nil {
+			return s.abortIntentBeforeSchedule(rechecked, stopArbitrationReason(authorityErr))
+		}
+	}
+	if rechecked.TriggerPolicy == pluginstate.TriggerVerifiedSuccess {
+		if authorityErr := s.validateVerifiedAuthorization(ctx, rechecked); authorityErr != nil {
+			return s.abortIntentBeforeSchedule(rechecked, verifiedAuthorizationReason(authorityErr))
+		}
 	}
 	if rechecked.Generation != intentGeneration {
-		return errJobChanged
+		return s.abortIntentBeforeSchedule(rechecked, "job_changed_before_schedule")
+	}
+	callStarted, err := s.config.Store.PersistScheduleCallStarted(rechecked.JobID, recoveryEnvelope.EnvelopeHash, s.config.Now().UTC())
+	if err != nil {
+		return s.abortIntentBeforeSchedule(rechecked, "schedule_call_start_persist_failed")
 	}
 	receipt, err := s.config.Backend.Schedule(ctx, request)
 	if err != nil {
@@ -443,10 +537,34 @@ func (s *Supervisor) schedule(ctx context.Context, jobID string) error {
 		_ = s.cancelAcceptedAction(ctx, rechecked, receipt, "invalid_power_receipt")
 		return fmt.Errorf("validate power receipt: %w", err)
 	}
+	if _, err := s.config.Store.PersistScheduleReceipt(rechecked.JobID, recoveryEnvelope.EnvelopeHash, callStarted.CallHash, receipt, s.config.Now().UTC()); err != nil {
+		_ = s.cancelAcceptedAction(ctx, rechecked, receipt, "schedule_receipt_seal_failed")
+		return fmt.Errorf("persist schedule receipt seal: %w", err)
+	}
 
 	afterSchedule, loadErr := s.config.Store.Load(rechecked.JobID)
 	if loadErr == nil && afterSchedule.CancelRequested {
 		return s.cancelPowerForReason(ctx, afterSchedule, receipt, valueOrCancelReason(afterSchedule, "continuation_during_schedule"))
+	}
+	if loadErr == nil {
+		if reason, pendingErr := s.pendingRevocationReason(afterSchedule.JobID); pendingErr != nil {
+			return s.cancelPowerForReason(ctx, afterSchedule, receipt, reason)
+		}
+	}
+	if loadErr == nil && afterSchedule.TriggerPolicy == pluginstate.TriggerAfterAllStop {
+		if _, authorityErr := s.config.Store.BarrierAuthority(afterSchedule.JobID); authorityErr != nil {
+			return s.cancelPowerForReason(ctx, afterSchedule, receipt, barrierAuthorityReason(authorityErr))
+		}
+	}
+	if loadErr == nil && isStopPolicy(afterSchedule.TriggerPolicy) {
+		if authorityErr := s.validateStopArbitration(ctx, afterSchedule); authorityErr != nil {
+			return s.cancelPowerForReason(ctx, afterSchedule, receipt, stopArbitrationReason(authorityErr))
+		}
+	}
+	if loadErr == nil && afterSchedule.TriggerPolicy == pluginstate.TriggerVerifiedSuccess {
+		if authorityErr := s.validateVerifiedAuthorization(ctx, afterSchedule); authorityErr != nil {
+			return s.cancelPowerForReason(ctx, afterSchedule, receipt, verifiedAuthorizationReason(authorityErr))
+		}
 	}
 	if loadErr != nil || afterSchedule.State != pluginstate.StateActionIntent || afterSchedule.Generation != intentGeneration {
 		_ = s.cancelAcceptedAction(ctx, rechecked, receipt, "job_changed_after_schedule")
@@ -481,13 +599,13 @@ func (s *Supervisor) monitorScheduled(ctx context.Context, scheduled pluginstate
 	for {
 		current, err := s.config.Store.Load(scheduled.JobID)
 		if err != nil {
-			return err
+			return s.emergencyCancelRetained(scheduled, *scheduled.PowerReceipt, "countdown_state_unavailable", err)
 		}
 		if current.State.IsTerminal() {
 			return nil
 		}
 		if current.State != pluginstate.StateActionScheduled || current.PowerReceipt == nil || current.PowerReceipt.Checksum != scheduled.PowerReceipt.Checksum {
-			return errors.New("scheduled plugin job changed during countdown monitoring")
+			return s.emergencyCancelRetained(scheduled, *scheduled.PowerReceipt, "countdown_state_or_receipt_changed", errors.New("scheduled plugin job changed during countdown monitoring"))
 		}
 		now := s.config.Now().UTC()
 		reason := current.CancelReason
@@ -508,6 +626,26 @@ func (s *Supervisor) monitorScheduled(ctx context.Context, scheduled pluginstate
 				if profileErr != nil || !current.VerifierPassed || profile.Fingerprint != current.VerifierFingerprint {
 					reason = "verifier_profile_changed_during_countdown"
 				}
+			}
+		}
+		if !current.CancelRequested && reason == "" && current.TriggerPolicy == pluginstate.TriggerVerifiedSuccess {
+			if authorityErr := s.validateVerifiedAuthorization(ctx, current); authorityErr != nil {
+				reason = verifiedAuthorizationReason(authorityErr)
+			}
+		}
+		if !current.CancelRequested && reason == "" && current.TriggerPolicy == pluginstate.TriggerAfterAllStop {
+			if _, authorityErr := s.config.Store.BarrierAuthority(current.JobID); authorityErr != nil {
+				reason = barrierAuthorityReason(authorityErr)
+			}
+		}
+		if !current.CancelRequested && reason == "" {
+			if pendingReason, pendingErr := s.pendingRevocationReason(current.JobID); pendingErr != nil {
+				reason = pendingReason
+			}
+		}
+		if !current.CancelRequested && reason == "" && isStopPolicy(current.TriggerPolicy) {
+			if authorityErr := s.validateStopArbitration(ctx, current); authorityErr != nil {
+				reason = stopArbitrationReason(authorityErr)
 			}
 		}
 		if !current.CancelRequested && reason == "" && current.TriggerPolicy == pluginstate.TriggerVerifiedSuccess {
@@ -554,6 +692,90 @@ func (s *Supervisor) monitorScheduled(ctx context.Context, scheduled pluginstate
 	}
 }
 
+func isStopPolicy(policy pluginstate.TriggerPolicy) bool {
+	return policy == pluginstate.TriggerAfterStop || policy == pluginstate.TriggerAfterAllStop
+}
+
+func (s *Supervisor) validateStopArbitration(ctx context.Context, job pluginstate.Job) error {
+	if s.config.StopArbitration == nil {
+		return ErrStopArbitrationUnavailable
+	}
+	return s.config.StopArbitration.ValidateFinalStop(ctx, job)
+}
+
+func stopArbitrationReason(err error) string {
+	if errors.Is(err, ErrStopArbitrationUnavailable) {
+		return "stop_arbitration_unavailable"
+	}
+	return "stop_arbitration_invalid"
+}
+
+func (s *Supervisor) validateVerifiedAuthorization(ctx context.Context, job pluginstate.Job) error {
+	if s.config.VerifiedAuthorization == nil {
+		return ErrVerifiedSuccessAuthorityUnavailable
+	}
+	return s.config.VerifiedAuthorization.ValidateVerifiedSuccess(ctx, job)
+}
+
+func verifiedAuthorizationReason(err error) string {
+	if errors.Is(err, ErrVerifiedSuccessAuthorityUnavailable) {
+		return "verified_success_authority_unavailable"
+	}
+	return "verified_success_authority_invalid"
+}
+
+func (s *Supervisor) pendingRevocationReason(jobID string) (string, error) {
+	marker, pending, err := s.config.Store.PendingRevocation(jobID)
+	if err != nil {
+		return "revocation_channel_unavailable", err
+	}
+	if pending {
+		return "revocation_pending:" + marker.Reason, errors.New("durable revocation is unresolved")
+	}
+	return "", nil
+}
+
+func (s *Supervisor) abortIntentBeforeSchedule(job pluginstate.Job, reason string) error {
+	if err := s.persistRecoveryResolutionIfPresent(job.JobID, "no_action", reason, nil); err != nil {
+		return err
+	}
+	_, _, err := s.config.Store.UpdateJob(job.JobID, "power.intent_aborted_no_call", "", func(current *pluginstate.Job, _ time.Time) error {
+		if current.State.IsTerminal() {
+			return nil
+		}
+		if current.State != pluginstate.StateActionIntent {
+			return errJobChanged
+		}
+		current.CancelRequested = true
+		current.CancelReason = reason
+		current.State = pluginstate.StateCancelled
+		current.ReasonCode = "pre_schedule_intent_cancelled:" + reason
+		return nil
+	})
+	return err
+}
+
+func (s *Supervisor) emergencyCancelRetained(job pluginstate.Job, receipt actions.Receipt, reason string, cause error) error {
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cancelErr := s.cancelPowerForReason(cancelCtx, job, receipt, reason)
+	if cancelErr != nil {
+		return errors.Join(cause, fmt.Errorf("emergency countdown cancellation failed: %w", cancelErr))
+	}
+	return cause
+}
+
+func (s *Supervisor) persistRecoveryResolutionIfPresent(jobID, outcome, reason string, result *actions.CancelResult) error {
+	if _, err := s.config.Store.LoadRecoveryAuthority(jobID); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	_, err := s.config.Store.PersistRecoveryResolution(jobID, outcome, reason, result, s.config.Now().UTC())
+	return err
+}
+
 func (s *Supervisor) policyMatches(job pluginstate.Job) bool {
 	if s.config.CurrentPolicyFingerprint == nil || job.PowerPolicyFingerprint == "" || job.PowerPolicyFingerprint != s.config.PolicyFingerprint {
 		return false
@@ -569,6 +791,11 @@ func (s *Supervisor) verifiedConfigReady() bool {
 
 func (s *Supervisor) cancelPowerForReason(ctx context.Context, job pluginstate.Job, receipt actions.Receipt, reason string) error {
 	result, cancelErr := s.config.Backend.Cancel(ctx, receipt)
+	if cancelErr == nil || errors.Is(cancelErr, actions.ErrNoShutdownInProgress) {
+		if resolutionErr := s.persistRecoveryResolutionIfPresent(job.JobID, "cancelled", reason, &result); resolutionErr != nil {
+			return resolutionErr
+		}
+	}
 	_, _, stateErr := s.config.Store.UpdateJob(job.JobID, "power.countdown_cancel", "", func(current *pluginstate.Job, _ time.Time) error {
 		if current.State.IsTerminal() {
 			return nil
@@ -603,6 +830,17 @@ func valueOrCancelReason(job pluginstate.Job, fallback string) string {
 	return fallback
 }
 
+func barrierAuthorityReason(err error) string {
+	var authorityErr *pluginstate.BarrierAuthorityError
+	if errors.As(err, &authorityErr) && authorityErr.Reason != "" {
+		return authorityErr.Reason
+	}
+	if errors.Is(err, pluginstate.ErrLockTimeout) {
+		return "revocation_channel_unavailable"
+	}
+	return "barrier_binding_incomplete"
+}
+
 func (s *Supervisor) cancelAcceptedAction(ctx context.Context, job pluginstate.Job, receipt actions.Receipt, reason string) error {
 	cancelReceipt := receipt
 	if actions.ValidateReceipt(cancelReceipt) != nil || cancelReceipt.JobID != job.JobID || cancelReceipt.Action != job.Action {
@@ -612,6 +850,11 @@ func (s *Supervisor) cancelAcceptedAction(ctx context.Context, job pluginstate.J
 		cancelReceipt = *job.PowerReceipt
 	}
 	result, cancelErr := s.config.Backend.Cancel(ctx, cancelReceipt)
+	if cancelErr == nil || errors.Is(cancelErr, actions.ErrNoShutdownInProgress) {
+		if resolutionErr := s.persistRecoveryResolutionIfPresent(job.JobID, "cancelled", reason, &result); resolutionErr != nil {
+			return resolutionErr
+		}
+	}
 	_, _, stateErr := s.config.Store.UpdateJob(job.JobID, "power.rollback", "", func(current *pluginstate.Job, _ time.Time) error {
 		current.CancelResult = &result
 		if current.State.IsTerminal() {

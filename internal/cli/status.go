@@ -41,6 +41,9 @@ func statusCommand(args []string, streams IO, deps dependencies) int {
 		} else if errors.Is(err, os.ErrNotExist) {
 			pluginJob, pluginErr := pluginStore.Load(args[0])
 			if pluginErr != nil {
+				if authority, recoveryErr := pluginStore.LoadRecoveryAuthority(args[0]); recoveryErr == nil {
+					return writePluginRecoveryStatus(streams, authority.Status())
+				}
 				return runtimeError(streams.Stderr, supervisor.ExitStateError, "load job", pluginErr)
 			}
 			if pluginJob.State.IsActive() && pluginJob.Expired(timeNowUTC()) {
@@ -51,6 +54,9 @@ func statusCommand(args []string, streams IO, deps dependencies) int {
 			}
 			pluginJobs = []pluginstate.Job{pluginJob}
 		} else {
+			if authority, recoveryErr := pluginStore.LoadRecoveryAuthority(args[0]); recoveryErr == nil {
+				return writePluginRecoveryStatus(streams, authority.Status())
+			}
 			return runtimeError(streams.Stderr, supervisor.ExitStateError, "load job", err)
 		}
 	} else {
@@ -103,7 +109,7 @@ func statusCommand(args []string, streams IO, deps dependencies) int {
 	}
 	if len(pluginJobs) != 0 {
 		writer := tabwriter.NewWriter(streams.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(writer, "PLUGIN JOB ID\tSTATE\tTRIGGER\tMODE\tCANCEL\tHOST\tVERIFIER\tACTION\tEXPIRES\tSCHEDULED")
+		fmt.Fprintln(writer, "PLUGIN JOB ID\tSTATE\tTRIGGER\tMODE\tBARRIER\tCANCEL\tHOST\tVERIFIER\tACTION\tEXPIRES\tSCHEDULED")
 		for _, job := range pluginJobs {
 			if job.State.IsActive() && job.Expired(timeNowUTC()) {
 				refreshed, refreshErr := pluginStore.RefreshExpiry(job.JobID)
@@ -121,11 +127,16 @@ func statusCommand(args []string, streams IO, deps dependencies) int {
 			if status.CancelRequested {
 				cancelState = "requested"
 			}
-			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			barrierProgress := "-"
+			if status.Barrier != nil {
+				barrierProgress = fmt.Sprintf("%d/%d stopped", status.Barrier.TargetsStopped, status.Barrier.TargetsTotal)
+			}
+			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				status.JobID,
 				status.State,
 				status.TriggerPolicy,
 				status.Mode,
+				barrierProgress,
 				cancelState,
 				status.HostSnapshots,
 				status.VerifierStatus,
@@ -142,3 +153,24 @@ func statusCommand(args []string, streams IO, deps dependencies) int {
 }
 
 var timeNowUTC = func() time.Time { return time.Now().UTC() }
+
+func writePluginRecoveryStatus(streams IO, status pluginstate.RecoveryStatus) int {
+	fmt.Fprintln(streams.Stdout, "[DoneThen] Mutable plugin job state is unavailable; independent recovery authority remains readable.")
+	writer := tabwriter.NewWriter(streams.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(writer, "PLUGIN JOB ID\tRECOVERY PHASE\tRECEIPT\tSETTLEMENT REQUIRED\tCANCEL REQUIRED\tRESOLUTION\tCANCEL SCOPE")
+	receipt := "intent"
+	if status.ReceiptSealed {
+		receipt = "sealed"
+	}
+	resolution := status.Resolution
+	if resolution == "" {
+		resolution = "-"
+	}
+	fmt.Fprintf(writer, "%s\t%s\t%s\t%t\t%t\t%s\t%s\n",
+		status.JobID, status.Phase, receipt, status.RequiresSettlement, status.RequiresCancellation, resolution, status.CancelScope)
+	if err := writer.Flush(); err != nil {
+		return runtimeError(streams.Stderr, supervisor.ExitStateError, "write plugin recovery status", err)
+	}
+	fmt.Fprintf(streams.Stdout, "Recovery commands: %s | %s\n", status.CancelCommand, status.ReconcileCommand)
+	return 0
+}

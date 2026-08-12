@@ -6,6 +6,7 @@ import (
 
 	"github.com/andyandymike/done-then/internal/hookobserver"
 	"github.com/andyandymike/done-then/internal/pluginapi"
+	"github.com/andyandymike/done-then/internal/pluginpower"
 	"github.com/andyandymike/done-then/internal/pluginstate"
 )
 
@@ -30,7 +31,9 @@ func hookCommand(args []string, streams IO, deps dependencies) int {
 		fmt.Fprintf(streams.Stderr, "[DoneThen hook] state unavailable: %s.\n", pluginapi.SanitizeError(err))
 		return 0
 	}
-	observer, err := hookobserver.New(state)
+	observer, err := hookobserver.NewWithOptions(state, hookobserver.Options{
+		CancelLauncher: pluginpower.Launcher{DataRoot: root},
+	})
 	if err != nil {
 		fmt.Fprintf(streams.Stderr, "[DoneThen hook] observer unavailable: %s.\n", pluginapi.SanitizeError(err))
 		return 0

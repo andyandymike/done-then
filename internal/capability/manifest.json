@@ -1,32 +1,32 @@
 {
   "schema_version": 1,
-  "updated": "2026-08-06",
-  "plugin_execute_default": "after_stop_on_supported_platforms",
+  "updated": "2026-08-12",
+  "plugin_execute_default": "disabled",
   "verified_success_execute_default": "disabled",
   "platforms": {
     "windows-amd64": {
       "level": "C2",
-      "statement": "preview; after-stop plugin path and real backend code are present, but real cancel and poweroff acceptance are pending"
+      "statement": "preview; dry-run and real backend code are present, but Stop-based execute is disabled pending trusted final Hook arbitration and real power acceptance"
     },
     "windows-arm64": {
-      "level": "C1",
-      "statement": "portable build only; native acceptance is pending"
+      "level": "C0",
+      "statement": "build-only candidate; target-architecture unit evidence is pending"
     },
     "linux-amd64": {
       "level": "C1",
-      "statement": "systemd helper code is present; installation and real-host acceptance are pending"
+      "statement": "systemd helper code is present; Stop-based execute, installation, and real-host acceptance are pending"
     },
     "linux-arm64": {
-      "level": "C1",
-      "statement": "systemd helper code is present; installation and real-host acceptance are pending"
+      "level": "C0",
+      "statement": "build-only candidate; arm64 unit and lifecycle VM evidence is pending"
     },
     "darwin-amd64": {
-      "level": "C1",
-      "statement": "portable build only; signed and notarized helper is not delivered"
+      "level": "C0",
+      "statement": "build-only candidate; native amd64 unit evidence and a power helper are not delivered"
     },
     "darwin-arm64": {
-      "level": "C1",
-      "statement": "portable build only; signed and notarized helper is not delivered"
+      "level": "C0",
+      "statement": "build-only candidate; native arm64 unit evidence and a power helper are not delivered"
     }
   }
 }

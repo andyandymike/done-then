@@ -19,6 +19,50 @@ type observerTestLauncher struct{}
 
 func (observerTestLauncher) Launch(string) (int, error) { return 4242, nil }
 
+type observerCancelLauncher struct {
+	state               *pluginstate.Store
+	calls               int
+	jobID               string
+	bindingID           string
+	reason              string
+	durableBeforeLaunch bool
+}
+
+func (l *observerCancelLauncher) EnsureCancelWorker(jobID, bindingID, reason string) (int, error) {
+	l.calls++
+	l.jobID = jobID
+	l.bindingID = bindingID
+	l.reason = reason
+	_, pending, err := l.state.PendingRevocation(jobID)
+	l.durableBeforeLaunch = err == nil && pending
+	return 4243, nil
+}
+
+func TestHookStateLockRetryUsesTheProductionAttemptBudget(t *testing.T) {
+	attempts := 0
+	err := retryStateLock(func() error {
+		attempts++
+		if attempts < hookStateLockAttempts {
+			return pluginstate.ErrLockTimeout
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != hookStateLockAttempts {
+		t.Fatalf("state lock attempts = %d, want %d", attempts, hookStateLockAttempts)
+	}
+}
+
+func TestHookEventKeyUsesUnambiguousTupleEncoding(t *testing.T) {
+	first := hookInput{SessionID: "a\x00b", TurnID: "c", HookEventName: "Stop"}
+	second := hookInput{SessionID: "a", TurnID: "b\x00c", HookEventName: "Stop"}
+	if hookEventKey(first, "dt_TEST") == hookEventKey(second, "dt_TEST") {
+		t.Fatal("length-ambiguous hook tuples produced the same event key")
+	}
+}
+
 func TestObserveOnlyLifecycleBindsFinishesAndRecordsStop(t *testing.T) {
 	state, service, observer := testComponents(t)
 	arm := service.Call(context.Background(), "arm", json.RawMessage(`{
@@ -254,6 +298,9 @@ func TestAfterStopExecuteUsesHookWorkspaceAndWaitsForMatchingStop(t *testing.T) 
 	if afterSessionEnd.State != pluginstate.StateStopObserved || afterSessionEnd.StopTurnID != "turn-1" {
 		t.Fatalf("SessionEnd revoked accepted after-stop grant = %#v", afterSessionEnd)
 	}
+	if _, pending, err := state.PendingRevocation(jobID); err != nil || pending {
+		t.Fatalf("accepted after-stop SessionEnd created revocation: pending=%t err=%v", pending, err)
+	}
 }
 
 func TestAfterStopGrantIsCancelledByNextUserPrompt(t *testing.T) {
@@ -349,7 +396,8 @@ func TestUserPromptPreservesScheduledReceiptAndRequestsCancellation(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	observer, err := New(state)
+	cancelLauncher := &observerCancelLauncher{state: state}
+	observer, err := NewWithOptions(state, Options{CancelLauncher: cancelLauncher})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,6 +412,139 @@ func TestUserPromptPreservesScheduledReceiptAndRequestsCancellation(t *testing.T
 	if updated.State != pluginstate.StateActionScheduled || !updated.CancelRequested || updated.PowerReceipt == nil ||
 		updated.PowerReceipt.Checksum != receipt.Checksum || updated.Generation <= job.Generation {
 		t.Fatalf("continued scheduled job = %#v", updated)
+	}
+	if cancelLauncher.calls != 1 || cancelLauncher.jobID != job.JobID || cancelLauncher.bindingID != job.JobID ||
+		!cancelLauncher.durableBeforeLaunch {
+		t.Fatalf("cancel worker handoff = %#v", cancelLauncher)
+	}
+}
+
+func TestAfterAllStopReopensOnlyTheTargetThatContinues(t *testing.T) {
+	state, service, observer := testComponents(t)
+	root := filepath.Dir(state.Root())
+	arm := service.Call(context.Background(), "arm", json.RawMessage(`{
+		"action":"shutdown","trigger_policy":"after_all_stop",
+		"target_session_ids":["target-a","target-b"],
+		"acknowledge_stop_without_success":false,"acknowledge_barrier_across_turns":false,
+		"delay_seconds":120,"expires_in_seconds":3600,"mode":"dry_run",
+		"verifier_profile":"none","allow_agent_only_success":false
+	}`))
+	if arm.IsError {
+		t.Fatalf("arm barrier = %#v", arm)
+	}
+	jobID := arm.Structured["job_id"].(string)
+	observeToolAtWorkspace(t, observer, "controller", "controller-turn", "call-arm-barrier", "arm", root, json.RawMessage(`{}`), arm)
+
+	targetAWorkspace := filepath.Join(root, "repo-a")
+	targetBWorkspace := filepath.Join(root, "repo-b")
+	observeHook(t, observer, map[string]any{
+		"session_id": "target-a", "turn_id": "turn-a-1", "cwd": targetAWorkspace,
+		"hook_event_name": "Stop", "stop_hook_active": false,
+	})
+	partial, err := state.Load(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped, _ := partial.BarrierProgress()
+	if partial.State != pluginstate.StateArmed || stopped != 1 || partial.ReasonCode != "after_all_stop_barrier_partial" {
+		t.Fatalf("first target Stop = %#v", partial)
+	}
+
+	observeHook(t, observer, map[string]any{
+		"session_id": "target-a", "turn_id": "turn-a-2", "cwd": targetAWorkspace,
+		"hook_event_name": "UserPromptSubmit", "prompt": "continue target a",
+	})
+	observeHook(t, observer, map[string]any{
+		"session_id": "target-b", "turn_id": "turn-b-1", "cwd": targetBWorkspace,
+		"hook_event_name": "Stop", "stop_hook_active": false,
+	})
+	reopened, err := state.Load(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped, _ = reopened.BarrierProgress()
+	if reopened.State != pluginstate.StateArmed || stopped != 1 ||
+		reopened.StopTargets[0].CurrentTurnHash != identity.SHA256([]byte("turn-a-2")) || reopened.StopTargets[0].Stopped() {
+		t.Fatalf("reopened barrier = %#v", reopened)
+	}
+
+	// A replay from target A's old turn cannot satisfy the barrier.
+	observeHook(t, observer, map[string]any{
+		"session_id": "target-a", "turn_id": "turn-a-1", "cwd": targetAWorkspace,
+		"hook_event_name": "Stop", "stop_hook_active": false,
+	})
+	stillPending, err := state.Load(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillPending.State != pluginstate.StateArmed || stillPending.StopTargets[0].Stopped() {
+		t.Fatalf("stale Stop satisfied barrier = %#v", stillPending)
+	}
+
+	observeHook(t, observer, map[string]any{
+		"session_id": "target-a", "turn_id": "turn-a-2", "cwd": targetAWorkspace,
+		"hook_event_name": "Stop", "stop_hook_active": false,
+	})
+	complete, err := state.Load(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped, unseen := complete.BarrierProgress()
+	if complete.State != pluginstate.StateDryRunComplete || stopped != 2 || unseen != 0 ||
+		complete.ReasonCode != "after_all_stop_observed_no_action" {
+		t.Fatalf("completed barrier = %#v", complete)
+	}
+	status := state.Status(complete)
+	if status.Barrier == nil || status.Barrier.TargetsStopped != 2 || status.Barrier.TargetsPending != 0 ||
+		status.Barrier.Targets[0].SessionRef == "target-a" {
+		t.Fatalf("redacted barrier status = %#v", status.Barrier)
+	}
+	logData, err := os.ReadFile(filepath.Join(state.Root(), "events", jobID+".jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logData), "target-a") || strings.Contains(string(logData), "turn-a-2") {
+		t.Fatalf("barrier event log leaked raw identities: %s", logData)
+	}
+}
+
+func TestAfterAllStopContinuationTombstoneAndEarlySessionEndFailClosed(t *testing.T) {
+	state, service, observer := testComponents(t)
+	root := filepath.Dir(state.Root())
+	arm := service.Call(context.Background(), "arm", json.RawMessage(`{
+		"action":"shutdown","trigger_policy":"after_all_stop",
+		"target_session_ids":["continued","ended"],
+		"acknowledge_stop_without_success":false,"acknowledge_barrier_across_turns":false,
+		"delay_seconds":120,"expires_in_seconds":3600,"mode":"dry_run",
+		"verifier_profile":"none","allow_agent_only_success":false
+	}`))
+	jobID := arm.Structured["job_id"].(string)
+	observeToolAtWorkspace(t, observer, "controller", "controller-turn", "call-arm-continuation", "arm", root, json.RawMessage(`{}`), arm)
+	workspace := filepath.Join(root, "continued-repo")
+	observeHook(t, observer, map[string]any{
+		"session_id": "continued", "turn_id": "turn-1", "cwd": workspace,
+		"hook_event_name": "Stop", "stop_hook_active": true,
+	})
+	observeHook(t, observer, map[string]any{
+		"session_id": "continued", "turn_id": "turn-1", "cwd": workspace,
+		"hook_event_name": "Stop", "stop_hook_active": false,
+	})
+	continued, err := state.Load(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if continued.StopTargets[0].ContinuationTurnHash == "" || continued.StopTargets[0].Stopped() {
+		t.Fatalf("continuation tombstone = %#v", continued.StopTargets[0])
+	}
+	observeHook(t, observer, map[string]any{
+		"session_id": "ended", "hook_event_name": "SessionEnd", "reason": "other",
+	})
+	expired, err := state.Load(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expired.State != pluginstate.StateExpired || expired.ReasonCode != "target_session_ended_before_stop" {
+		t.Fatalf("early target SessionEnd = %#v", expired)
 	}
 }
 
@@ -409,6 +590,17 @@ func observeToolAtWorkspace(t *testing.T, observer *Observer, sessionID, turnID,
 		"tool_input":      input,
 		"tool_response":   json.RawMessage(response),
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := observer.Handle(strings.NewReader(string(payload))); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func observeHook(t *testing.T, observer *Observer, fields map[string]any) {
+	t.Helper()
+	payload, err := json.Marshal(fields)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,6 +3,7 @@ package pluginstate
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,229 @@ import (
 	"github.com/andyandymike/done-then/internal/actions"
 	"github.com/andyandymike/done-then/internal/identity"
 )
+
+func TestBarrierReservationsSerializeConcurrentStopsAndRevalidateEveryIndex(t *testing.T) {
+	root := t.TempDir()
+	state, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetIDs := []string{"target-a", "target-b", "target-c"}
+	targets := make([]StopTarget, 0, len(targetIDs))
+	for _, sessionID := range targetIDs {
+		targets = append(targets, StopTarget{SessionHash: identity.SHA256([]byte(sessionID))})
+	}
+	now := time.Now().UTC()
+	job := Job{
+		SchemaVersion: CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
+		State: StateArmPendingBind, ReasonCode: "awaiting_post_tool_hook", Action: "shutdown",
+		TriggerPolicy: TriggerAfterAllStop, StopWithoutSuccessAck: true, BarrierAcrossTurnsAck: true,
+		DelaySeconds: 120, ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
+		Generation: 1, VerifierProfile: "none", HookCompatibility: "not_evaluated",
+		WorkspaceCWD: root, TargetBindingID: bindingIdentity.JobID, StopTargets: targets,
+	}
+	job, err = state.CreateBarrierReservations(job, targetIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _, err = state.BindSession(job.JobID, "controller", "controller-turn", root, fmt.Sprintf("%064x", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != StateArmed || !job.TargetIndexesReady {
+		t.Fatalf("bound barrier = %#v", job)
+	}
+
+	var wait sync.WaitGroup
+	errorsChannel := make(chan error, len(targetIDs))
+	for index, sessionID := range targetIDs {
+		index, sessionID := index, sessionID
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			eventKey := fmt.Sprintf("%064x", index+10)
+			var updateErr error
+			for attempt := 0; attempt < 4; attempt++ {
+				_, _, _, updateErr = state.UpdateObservedSession(sessionID, "turn", "test.barrier.stop", eventKey, func(job *Job, target *StopTarget, observedAt time.Time) error {
+					turnHash := identity.SHA256([]byte("turn"))
+					firstSeen := observedAt
+					target.WorkspaceCWD = root
+					target.FirstSeenAt = &firstSeen
+					target.CurrentTurnHash = turnHash
+					target.StopTurnHash = turnHash
+					target.StopObservedAt = &observedAt
+					job.Generation++
+					if job.BarrierSatisfied() {
+						job.State = StateStopObserved
+						job.ReasonCode = "after_all_stop_observed_awaiting_countdown"
+					} else {
+						job.State = StateArmed
+						job.ReasonCode = "after_all_stop_barrier_partial"
+					}
+					return nil
+				})
+				if !errors.Is(updateErr, ErrLockTimeout) {
+					break
+				}
+			}
+			if updateErr != nil {
+				errorsChannel <- updateErr
+			}
+		}()
+	}
+	wait.Wait()
+	close(errorsChannel)
+	for updateErr := range errorsChannel {
+		t.Fatal(updateErr)
+	}
+	stopped, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, unseen := stopped.BarrierProgress()
+	if stopped.State != StateStopObserved || count != len(targetIDs) || unseen != 0 {
+		t.Fatalf("concurrent barrier = %#v", stopped)
+	}
+	if _, err := state.BarrierAuthority(job.JobID); err != nil {
+		t.Fatalf("complete barrier authority = %v", err)
+	}
+	if err := os.Remove(state.sessionPath(targetIDs[0])); err != nil {
+		t.Fatal(err)
+	}
+	_, err = state.BarrierAuthority(job.JobID)
+	var authorityErr *BarrierAuthorityError
+	if !errors.As(err, &authorityErr) || authorityErr.Reason != "target_index_changed" {
+		t.Fatalf("missing live index authority error = %v", err)
+	}
+}
+
+func TestCapturedEmptyBindingCannotBeAppliedToConcurrentBarrier(t *testing.T) {
+	root := t.TempDir()
+	state, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetIDs := []string{"late-target-a", "late-target-b"}
+	now := time.Now().UTC()
+	job := Job{
+		SchemaVersion: CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
+		State: StateArmPendingBind, ReasonCode: "awaiting_post_tool_hook", Action: "shutdown",
+		TriggerPolicy: TriggerAfterAllStop, StopWithoutSuccessAck: true, BarrierAcrossTurnsAck: true,
+		DelaySeconds: 120, ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
+		Generation: 1, VerifierProfile: "none", HookCompatibility: "not_evaluated",
+		WorkspaceCWD: root, TargetBindingID: bindingIdentity.JobID,
+		StopTargets: []StopTarget{
+			{SessionHash: identity.SHA256([]byte(targetIDs[0]))},
+			{SessionHash: identity.SHA256([]byte(targetIDs[1]))},
+		},
+	}
+	job, err = state.CreateBarrierReservations(job, targetIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _, err = state.BindSession(job.JobID, "late-controller", "controller-turn", root, fmt.Sprintf("%064x", 90))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated := false
+	_, changed, found, err := state.UpdateObservedSessionBinding(
+		targetIDs[0], "old-turn", "hook.stop", fmt.Sprintf("%064x", 91), "", "",
+		func(*Job, *StopTarget, time.Time) error {
+			mutated = true
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed || !found || mutated {
+		t.Fatalf("pre-arm event was applied to a concurrent barrier: changed=%t found=%t mutated=%t", changed, found, mutated)
+	}
+	loaded, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.StopTargets[0].FirstSeenAt != nil || loaded.StopTargets[0].CurrentTurnHash != "" {
+		t.Fatalf("concurrent barrier target was mutated: %#v", loaded.StopTargets[0])
+	}
+}
+
+func TestBarrierTargetStopBeforeControllerPostToolUseIsNotCredited(t *testing.T) {
+	root := t.TempDir()
+	state, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetIDs := []string{"prebind-target-a", "prebind-target-b"}
+	now := time.Now().UTC()
+	job := Job{
+		SchemaVersion: CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
+		State: StateArmPendingBind, ReasonCode: "awaiting_post_tool_hook", Action: "shutdown",
+		TriggerPolicy: TriggerAfterAllStop, DelaySeconds: 120,
+		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, Generation: 1,
+		VerifierProfile: "none", HookCompatibility: "not_evaluated", WorkspaceCWD: root,
+		TargetBindingID: bindingIdentity.JobID,
+		StopTargets: []StopTarget{
+			{SessionHash: identity.SHA256([]byte(targetIDs[0]))},
+			{SessionHash: identity.SHA256([]byte(targetIDs[1]))},
+		},
+	}
+	job, err = state.CreateBarrierReservations(job, targetIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, found, err := state.LookupObservedSession(targetIDs[0]); err != nil || found {
+		t.Fatalf("pending target reservation was exposed as an observed binding: found=%t err=%v", found, err)
+	}
+	mutated := false
+	_, changed, found, err := state.UpdateObservedSessionBinding(
+		targetIDs[0], "prebind-turn", "hook.stop", fmt.Sprintf("%064x", 92), job.JobID, job.TargetBindingID,
+		func(*Job, *StopTarget, time.Time) error {
+			mutated = true
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed || !found || mutated {
+		t.Fatalf("pre-controller Stop was credited: changed=%t found=%t mutated=%t", changed, found, mutated)
+	}
+	bound, _, err := state.BindSession(job.JobID, "prebind-controller", "controller-turn", root, fmt.Sprintf("%064x", 93))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.State != StateArmed || bound.StopTargets[0].CurrentTurnHash != "" || bound.StopTargets[0].FirstSeenAt != nil {
+		t.Fatalf("controller binding retained a pre-bind target event: %#v", bound)
+	}
+	if _, _, found, err := state.LookupObservedSession(targetIDs[0]); err != nil || !found {
+		t.Fatalf("bound target was not exposed to Hook observation: found=%t err=%v", found, err)
+	}
+}
 
 func TestConcurrentProcessesUseSerializedAtomicUpdates(t *testing.T) {
 	root := t.TempDir()

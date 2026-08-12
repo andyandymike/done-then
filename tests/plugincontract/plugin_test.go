@@ -107,6 +107,18 @@ func TestPluginObserversCannotSchedulePowerDirectly(t *testing.T) {
 	}
 }
 
+func TestUniversalCancelWorkerHasNoSchedulingPath(t *testing.T) {
+	path := filepath.Join(repositoryRoot(t), "internal", "cli", "cancel_worker.go")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, ".Schedule(") || !strings.Contains(text, ".Cancel(") {
+		t.Fatalf("cancel-only recovery crossed or omitted its fixed boundary in %s", path)
+	}
+}
+
 func TestGitHubWorkflowsUsePinnedActionsAndNoPowerCommands(t *testing.T) {
 	workflowRoot := filepath.Join(repositoryRoot(t), ".github", "workflows")
 	entries, err := os.ReadDir(workflowRoot)

@@ -11,12 +11,12 @@ marketplace and verifies one real Codex task in `after_stop` dry-run mode. The
 live-smoke harness never starts an execute supervisor or calls a platform
 action backend.
 
-The public MCP server can arm the default after-stop execute path on Windows or
-systemd Linux when backend preflight succeeds. That path is not part of this
-smoke workflow and does not represent completed real-host acceptance. The
-separate experimental `verified_success` execute policy remains unavailable by
-default because policy identity is not authoritative same-host App Server
-evidence.
+The public MCP server reports platform and backend preflight separately from
+execute readiness. Stop-based execute remains disabled even when Windows or a
+systemd Linux backend passes preflight, because Codex does not yet provide a
+trusted final Hook-arbitration receipt. The separate experimental
+`verified_success` execute policy also remains unavailable because policy
+identity is not authoritative same-host App Server evidence.
 
 Codex loads plugin Hooks alongside user, project, managed, and other-plugin
 Hooks. It does not replace those sources. Plugin Hooks also require a manual

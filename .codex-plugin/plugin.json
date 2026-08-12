@@ -1,7 +1,7 @@
 {
   "name": "done-then",
   "version": "0.2.0",
-  "description": "Start a cancellable shutdown countdown when the current Codex turn stops.",
+  "description": "Observe one or more Codex tasks for a fail-closed future shutdown handoff.",
   "author": {
     "name": "andyandymike",
     "url": "https://github.com/andyandymike"
@@ -19,8 +19,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Done Then",
-    "shortDescription": "Shut down after Codex stops",
-    "longDescription": "Arm a session-bound, time-limited grant that starts a cancellable shutdown countdown when the current Codex turn stops. Stop is an observable lifecycle event, not a claim that the task succeeded. A separate experimental verified-success mode remains available for development.",
+    "shortDescription": "Fail-closed shutdown after Codex",
+    "longDescription": "Observe a time-limited single-session or multi-session Stop grant without treating Stop as task success. Dry-run is available now; real Stop-based execute remains disabled until trusted final Hook arbitration and recovery evidence are delivered.",
     "developerName": "andyandymike",
     "category": "Productivity",
     "capabilities": [
@@ -29,7 +29,8 @@
     ],
     "websiteURL": "https://github.com/andyandymike/done-then",
     "defaultPrompt": [
-      "Shut down this computer two minutes after this turn stops; I understand Stop may not mean the task succeeded.",
+      "Dry-run Done Then for this turn and report the observed Stop state without taking a power action.",
+      "Dry-run Done Then for these explicit Codex task IDs and complete only after all targets Stop.",
       "Dry-run Done Then for this turn and report the observed Stop state.",
       "Show the current Done Then job status without taking a power action."
     ],

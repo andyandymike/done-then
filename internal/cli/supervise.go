@@ -30,6 +30,9 @@ func superviseCommand(ctx context.Context, args []string, streams IO, deps depen
 	}
 	job, err := state.Load(args[0])
 	if err != nil {
+		if authority, recoveryErr := state.LoadRecoveryAuthority(args[0]); recoveryErr == nil {
+			return cancelPluginRecoveryAuthority(ctx, authority, streams, deps, state)
+		}
 		return runtimeError(streams.Stderr, supervisor.ExitStateError, "load plugin job", err)
 	}
 	classicState, err := store.New(root)

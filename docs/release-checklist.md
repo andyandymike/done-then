@@ -111,14 +111,19 @@ starting the machine again, run:
 - [ ] Platform evidence justifies `ACTION_EXECUTED_CONFIRMED`; otherwise the
       result remains `ACTION_EXECUTION_UNVERIFIED` and the capability does not
       advance.
+- [ ] A trusted final Stop-arbitration provider is installed, validated, and
+      reports `execute_ready_by_policy.after_stop=true` before any plugin power
+      test or C5 claim.
 - [ ] A separate current-task Plugin after-stop execute run is completed before
       claiming C5.
 
-For the plugin-path case, install the reviewed artifact through the development
-or release plugin workflow, open a new Codex task, inspect and trust the exact
-DoneThen Hooks, then explicitly request an `after_stop` execute job with a
-five-minute delay. The prompt must acknowledge that Stop is not proof of task
-success. Record the returned job ID.
+The plugin-path case is currently blocked and MUST NOT be attempted while
+`execute_ready_by_policy.after_stop=false`. Once a separately reviewed trusted
+provider makes that field true, install the reviewed artifact through the
+development or release plugin workflow, open a new Codex task, inspect and
+trust the exact DoneThen Hooks, then explicitly request an `after_stop` execute
+job with a five-minute delay. The prompt must acknowledge that Stop is not
+proof of task success. Record the returned job ID.
 
 - [ ] `PostToolUse(arm)` bound the expected session, turn, and workspace.
 - [ ] A normal `Stop` with `stop_hook_active=false` advanced the same job.

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,13 +17,174 @@ import (
 	"github.com/andyandymike/done-then/internal/verifierprofile"
 )
 
+func TestPolicyCapabilitiesSeparatePlatformAndAuthorityReadiness(t *testing.T) {
+	state, err := pluginstate.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewWithOptions(state, Options{
+		PolicyCapabilities: map[pluginstate.TriggerPolicy]PolicyCapability{
+			pluginstate.TriggerAfterStop: {
+				BuildSupported: true, BackendSupported: true, BackendPreflightPassed: true,
+				ExecuteReady: false, UnavailableReason: "stop_arbitration_unavailable",
+			},
+			pluginstate.TriggerAfterAllStop: {
+				BuildSupported: true, BackendSupported: true, BackendPreflightPassed: true,
+				ExecuteReady: false, UnavailableReason: "stop_arbitration_unavailable",
+			},
+			pluginstate.TriggerVerifiedSuccess: {
+				BuildSupported: true, BackendSupported: true, BackendPreflightPassed: true,
+				ExecuteReady: false, UnavailableReason: "verified_success_authority_unavailable",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := service.Call(context.Background(), "status", json.RawMessage(`{}`))
+	if result.IsError || result.Structured["execute_available"] != false {
+		t.Fatalf("status capabilities = %#v", result)
+	}
+	build := result.Structured["build_supported_by_policy"].(map[string]bool)
+	backend := result.Structured["backend_preflight_passed_by_policy"].(map[string]bool)
+	ready := result.Structured["execute_ready_by_policy"].(map[string]bool)
+	reasons := result.Structured["execute_unavailable_reasons_by_policy"].(map[string]string)
+	if !build["after_stop"] || !backend["after_stop"] || ready["after_stop"] ||
+		reasons["after_stop"] != "stop_arbitration_unavailable" {
+		t.Fatalf("after_stop capability split: build=%#v backend=%#v ready=%#v reasons=%#v", build, backend, ready, reasons)
+	}
+	arm := service.Call(context.Background(), "arm", json.RawMessage(`{
+		"action":"shutdown","trigger_policy":"after_stop","acknowledge_stop_without_success":true,
+		"delay_seconds":120,"expires_in_seconds":3600,"mode":"execute",
+		"verifier_profile":"none","allow_agent_only_success":false
+	}`))
+	if !arm.IsError || arm.Structured["reason_code"] != "stop_arbitration_unavailable" ||
+		arm.Structured["power_action_called"] != false {
+		t.Fatalf("Stop execute did not fail closed: %#v", arm)
+	}
+}
+
 type fakeLauncher struct {
 	jobID string
+	calls int
 }
 
 func (l *fakeLauncher) Launch(jobID string) (int, error) {
 	l.jobID = jobID
+	l.calls++
 	return 1234, nil
+}
+
+type fakeRecoveryLauncher struct {
+	fakeLauncher
+	cancelCalls int
+	bindingID   string
+	reason      string
+}
+
+func (l *fakeRecoveryLauncher) EnsureCancelWorker(_ string, bindingID, reason string) (int, error) {
+	l.cancelCalls++
+	l.bindingID = bindingID
+	l.reason = reason
+	return 5678, nil
+}
+
+func TestAfterAllStopExecuteReservesEveryTargetBeforeLaunchingOneSupervisor(t *testing.T) {
+	root := t.TempDir()
+	state, err := pluginstate.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher := &fakeLauncher{}
+	backend := &actions.FakeBackend{}
+	service, err := NewWithOptions(state, Options{
+		AfterStopExecuteAvailable: true, Workspace: root, Launcher: launcher, Backend: backend,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected := service.Call(context.Background(), "arm", json.RawMessage(`{
+		"action":"shutdown","trigger_policy":"after_all_stop",
+		"target_session_ids":["target-a","target-b"],
+		"acknowledge_stop_without_success":true,"acknowledge_barrier_across_turns":false,
+		"delay_seconds":120,"expires_in_seconds":3600,"mode":"execute",
+		"verifier_profile":"none","allow_agent_only_success":false
+	}`))
+	if !rejected.IsError || rejected.Structured["reason_code"] != "barrier_across_turns_acknowledgement_required" {
+		t.Fatalf("unacknowledged barrier = %#v", rejected)
+	}
+	armed := service.Call(context.Background(), "arm", json.RawMessage(`{
+		"action":"shutdown","trigger_policy":"after_all_stop",
+		"target_session_ids":["target-a","target-b"],
+		"acknowledge_stop_without_success":true,"acknowledge_barrier_across_turns":true,
+		"delay_seconds":120,"expires_in_seconds":3600,"mode":"execute",
+		"verifier_profile":"none","allow_agent_only_success":false
+	}`))
+	if armed.IsError {
+		t.Fatalf("arm barrier = %#v", armed)
+	}
+	jobID := armed.Structured["job_id"].(string)
+	job, err := state.Load(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.TriggerPolicy != pluginstate.TriggerAfterAllStop || !job.TargetReservationsCommitted ||
+		job.TargetIndexesReady || len(job.StopTargets) != 2 || launcher.calls != 1 || launcher.jobID != jobID {
+		t.Fatalf("reserved barrier=%#v launcher=%#v", job, launcher)
+	}
+	if job.StopTargets[0].SessionHash != identity.SHA256([]byte("target-a")) ||
+		job.StopTargets[1].SessionHash != identity.SHA256([]byte("target-b")) {
+		t.Fatalf("target order/hash = %#v", job.StopTargets)
+	}
+	encodedJob, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encodedJob), "target-a") || strings.Contains(string(encodedJob), "target-b") {
+		t.Fatalf("barrier job persisted raw target ids: %s", encodedJob)
+	}
+	if backend.PreflightCalls != 1 {
+		t.Fatalf("preflight calls = %d", backend.PreflightCalls)
+	}
+	conflict := service.Call(context.Background(), "arm", json.RawMessage(`{
+		"action":"shutdown","trigger_policy":"after_all_stop",
+		"target_session_ids":["target-b","target-c"],
+		"acknowledge_stop_without_success":false,"acknowledge_barrier_across_turns":false,
+		"delay_seconds":120,"expires_in_seconds":3600,"mode":"dry_run",
+		"verifier_profile":"none","allow_agent_only_success":false
+	}`))
+	if !conflict.IsError || conflict.Structured["reason_code"] != "target_session_conflict" || launcher.calls != 1 {
+		t.Fatalf("overlapping barrier = %#v launcher=%#v", conflict, launcher)
+	}
+}
+
+func TestAfterAllStopRejectsDuplicateAndLegacyBarrierArguments(t *testing.T) {
+	state, err := pluginstate.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate := service.Call(context.Background(), "arm", json.RawMessage(`{
+		"action":"shutdown","trigger_policy":"after_all_stop","target_session_ids":["same","same"],
+		"acknowledge_stop_without_success":false,"acknowledge_barrier_across_turns":false,
+		"delay_seconds":120,"expires_in_seconds":3600,"mode":"dry_run",
+		"verifier_profile":"none","allow_agent_only_success":false
+	}`))
+	if !duplicate.IsError || duplicate.Structured["reason_code"] != "duplicate_target_session" {
+		t.Fatalf("duplicate targets = %#v", duplicate)
+	}
+	legacy := service.Call(context.Background(), "arm", json.RawMessage(`{
+		"action":"shutdown","trigger_policy":"after_stop","target_session_ids":["a","b"],
+		"acknowledge_stop_without_success":false,"acknowledge_barrier_across_turns":false,
+		"delay_seconds":120,"expires_in_seconds":3600,"mode":"dry_run",
+		"verifier_profile":"none","allow_agent_only_success":false
+	}`))
+	if !legacy.IsError || legacy.Structured["reason_code"] != "barrier_arguments_not_applicable" {
+		t.Fatalf("legacy barrier args = %#v", legacy)
+	}
 }
 
 func TestExecuteArmFailsClosedWithoutCreatingJob(t *testing.T) {
@@ -256,7 +418,7 @@ func TestExecuteArmStartsOneShotSupervisorWithoutSchedulingPower(t *testing.T) {
 	}
 }
 
-func TestCancelPersistsIntentUntilInFlightSchedulerSettles(t *testing.T) {
+func TestCancelSettlesLegacyIntentAfterPositiveBackendCancellation(t *testing.T) {
 	root := t.TempDir()
 	state, err := pluginstate.New(root)
 	if err != nil {
@@ -302,13 +464,84 @@ func TestCancelPersistsIntentUntilInFlightSchedulerSettles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.State != pluginstate.StateActionIntent || !updated.CancelRequested ||
+	if updated.State != pluginstate.StateCancelled || !updated.CancelRequested ||
 		updated.CancelReason != "mcp_cancelled_by_user" || updated.CancelResult == nil {
-		t.Fatalf("unresolved cancelled intent = %#v", updated)
+		t.Fatalf("settled cancelled intent = %#v", updated)
 	}
 	_, cancelCalls, _, _ := backend.Snapshot()
 	if cancelCalls != 1 {
 		t.Fatalf("backend cancel calls = %d", cancelCalls)
+	}
+}
+
+func TestMCPCancelHandsPreCallRecoveryToMachineFencedWorkerWithoutBackendCancel(t *testing.T) {
+	root := t.TempDir()
+	state, err := pluginstate.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobIdentity, err := identity.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	job := pluginstate.Job{
+		SchemaVersion: pluginstate.CurrentSchemaVersion, JobID: jobIdentity.JobID, NonceHash: jobIdentity.NonceHash,
+		State: pluginstate.StateStopObserved, ReasonCode: "after_stop_observed_awaiting_countdown", Action: "shutdown",
+		TriggerPolicy: pluginstate.TriggerAfterStop, StopWithoutSuccessAck: true, DelaySeconds: 120,
+		ExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now, Generation: 1,
+		SessionID: "mcp-pre-call", ArmTurnID: "turn-1", CurrentTurnID: "turn-1", StopTurnID: "turn-1",
+		VerifierProfile: "none", HookCompatibility: "session_bound", ArmObserved: true, WorkspaceCWD: root,
+	}
+	if err := state.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	backend := &actions.FakeBackend{}
+	request := actions.PowerRequest{JobID: job.JobID, Action: job.Action, Delay: 2 * time.Minute, Comment: "test", RequestedAt: now}
+	capabilities, err := backend.Preflight(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, err := actions.BuildIntentReceipt(job.JobID, job.Action, now, request.Delay, capabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.PersistRecoveryEnvelope(job, intent, now); err != nil {
+		t.Fatal(err)
+	}
+	deadline := intent.Deadline.UTC()
+	job, _, err = state.UpdateJob(job.JobID, "test.intent", "", func(current *pluginstate.Job, _ time.Time) error {
+		current.State = pluginstate.StateActionIntent
+		current.ReasonCode = "action_intent_recorded"
+		current.ActionIntentAt = &now
+		current.ScheduledFor = &deadline
+		current.PowerCapabilities = &capabilities
+		current.PowerReceipt = &intent
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher := &fakeRecoveryLauncher{}
+	service, err := NewWithOptions(state, Options{Backend: backend, Launcher: launcher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := service.Call(context.Background(), "cancel", json.RawMessage(`{"job_id":"`+job.JobID+`"}`))
+	if result.IsError || !strings.Contains(result.Text, "machine-fenced") {
+		t.Fatalf("MCP pre-call cancel = %#v", result)
+	}
+	updated, err := state.Load(job.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != pluginstate.StateActionIntent || !updated.CancelRequested ||
+		launcher.cancelCalls != 1 || launcher.bindingID != job.JobID || launcher.reason != "mcp_cancelled_by_user" {
+		t.Fatalf("MCP recovery handoff job=%#v launcher=%#v", updated, launcher)
+	}
+	_, cancelCalls, _, _ := backend.Snapshot()
+	if cancelCalls != 0 {
+		t.Fatalf("MCP pre-call cancellation called backend %d times", cancelCalls)
 	}
 }
 
@@ -359,7 +592,7 @@ func TestFinishRunsFixedRegisteredVerifierBeforeReadyState(t *testing.T) {
 		t.Fatalf("arm = %#v", arm)
 	}
 	jobID := arm.Structured["job_id"].(string)
-	if _, _, err := state.BindSession(jobID, "thread", "turn", root, eventKeyForTest("v")); err != nil {
+	if _, _, err := state.BindSession(jobID, "thread", "turn", root, eventKeyForTest("e")); err != nil {
 		t.Fatal(err)
 	}
 	finish := service.Call(context.Background(), "finish", json.RawMessage(`{

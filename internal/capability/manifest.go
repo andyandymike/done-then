@@ -27,7 +27,7 @@ func Load() (Manifest, error) {
 	if err := json.Unmarshal(manifestData, &manifest); err != nil {
 		return Manifest{}, fmt.Errorf("decode embedded capability manifest: %w", err)
 	}
-	if manifest.SchemaVersion != 1 || manifest.PluginExecuteDefault != "after_stop_on_supported_platforms" ||
+	if manifest.SchemaVersion != 1 || manifest.PluginExecuteDefault != "disabled" ||
 		manifest.VerifiedSuccessExecuteDefault != "disabled" || len(manifest.Platforms) == 0 {
 		return Manifest{}, fmt.Errorf("embedded capability manifest is invalid")
 	}

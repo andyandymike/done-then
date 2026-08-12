@@ -38,7 +38,7 @@ func TestPublicClaimsDoNotExceedManifest(t *testing.T) {
 	if err := json.Unmarshal(payload, &current); err != nil {
 		t.Fatal(err)
 	}
-	if current.SchemaVersion != 1 || current.PluginExecuteDefault != "after_stop_on_supported_platforms" ||
+	if current.SchemaVersion != 1 || current.PluginExecuteDefault != "disabled" ||
 		current.VerifiedSuccessExecuteDefault != "disabled" {
 		t.Fatalf("unexpected capability safety defaults: %#v", current)
 	}

@@ -1,6 +1,6 @@
 # DoneThen
 
-**Shut down your computer when Codex stops — with a cancellable safety window.**
+**A fail-closed safety interlock for shutting down after Codex stops.**
 
 [![CI](https://github.com/andyandymike/done-then/actions/workflows/ci.yml/badge.svg)](https://github.com/andyandymike/done-then/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -14,13 +14,14 @@ start another Codex run.
 > [!IMPORTANT]
 > A Codex `Stop` means the current turn stopped. It does **not** mean the work
 > succeeded. A partial result, failed check, blocked task, or question can also
-> end in `Stop`. Real `after_stop` mode therefore requires explicit acceptance
-> of that behavior and always uses a cancellable countdown of at least two
-> minutes.
+> end in `Stop`. More importantly, matching Stop Hooks can run concurrently;
+> observing our own Hook is not proof of the host's final decision. The public
+> runtime therefore keeps Stop-based execute disabled until a trusted final
+> arbitration provider exists. Dry-run remains available.
 
-DoneThen is pre-alpha. The Windows and Linux action paths are present, but real
-cancel and power-off release acceptance is still pending. macOS power actions
-remain unsupported. Build and review the source before using execute mode.
+DoneThen is pre-alpha. The Windows and Linux backend code is present, but public
+plugin execute is currently fail-closed. Real cancel and power-off acceptance
+is also pending. macOS power actions remain unsupported.
 
 ## How it works
 
@@ -28,10 +29,8 @@ Once the plugin and `donethen` runtime are installed, say this in the Codex task
 you want to leave running:
 
 ```text
-Use $done-then to shut down this computer two minutes after this Codex turn
-stops. I understand that Stop does not prove the task succeeded and that a
-partial, blocked, failed, or question-ending response can also start the
-countdown.
+Use $done-then in dry-run mode for this Codex turn. Record the Stop lifecycle
+event without invoking a power action, then show me the job status.
 ```
 
 Codex handles the transport commands itself. The user does **not** run
@@ -41,38 +40,48 @@ Codex handles the transport commands itself. The user does **not** run
 flowchart TD
     U["User asks in the current Codex task"] --> A["Skill calls done_then.arm"]
     A --> B["PostToolUse binds session, turn, and workspace"]
-    B --> W["Detached one-shot supervisor waits"]
+    B --> W["Observer waits; dry-run never starts a power process"]
     W --> S{"Normal Stop for the armed turn?"}
     S -- "No / continuation" --> C["Cancel or expire the grant"]
-    S -- "Yes" --> G["Lock machine power boundary and preflight backend"]
-    G --> D["Schedule a cancellable countdown (minimum 120 s)"]
-    D --> N{"New prompt in the same task or explicit cancel?"}
-    N -- "Yes" --> X["Cancel through the persisted receipt"]
-    N -- "No, deadline reached" --> P["Operating system shuts down"]
+    S -- "Yes, dry-run" --> R["Record DRY_RUN_COMPLETE; no power call"]
+    S -- "Yes, execute request" --> G{"Trusted final Hook arbitration available?"}
+    G -- "No (current public runtime)" --> F["Fail closed: stop_arbitration_unavailable"]
+    G -- "Future trusted provider" --> D["Power transaction and cancellable countdown"]
 ```
 
 The bundled Hooks are observers. They emit no model-facing output, return no
 `decision: block`, and do not edit or replace user, project, managed, or other
 plugin Hooks. Matching Hooks from all sources continue to run under Codex's
-normal Hook rules.
+normal Hook rules. The official [Codex Hooks documentation](https://learn.chatgpt.com/docs/hooks)
+states that multiple matching command Hooks launch concurrently; this is why a
+single observer invocation cannot authorize execute.
 
-## Two trigger policies
+## Three trigger policies
 
 ### `after_stop` — default
 
-This is the practical workflow. It deliberately answers only one question:
+This is the default dry-run workflow. It deliberately answers only one question:
 “did the armed Codex turn stop?” It does not inspect task semantics and does not
 call `finish` or a verifier.
 
 - The grant is one-shot, time-limited, and bound by the arm Hook to the current
   Codex session, turn, and workspace.
-- Execute mode requires `acknowledge_stop_without_success=true`.
-- The execute delay must be between 120 and 3600 seconds.
+- Public execute currently returns `stop_arbitration_unavailable` before a job
+  or supervisor can gain power authority.
 - A later user prompt in the same Codex task, a Stop-Hook continuation, expiry,
   platform failure, or explicit cancellation prevents or cancels the action.
 - Closing Codex after an accepted Stop does not silently revoke a shutdown the
   user explicitly requested.
 - Dry-run records the matching Stop without calling the power backend.
+
+### `after_all_stop` — multi-session barrier
+
+This policy creates one barrier job for 2-16 explicit session IDs. Each target
+must be observed after the barrier is created, and every target must Stop before
+the dry-run completes. A resumed target becomes pending again; the controller
+can inspect status without becoming a target unless its session ID is listed.
+It still observes lifecycle only and does not claim that any task succeeded.
+Real execute is disabled by the same final-arbitration gate as `after_stop`.
 
 ### `verified_success` — experimental
 
@@ -93,15 +102,26 @@ DoneThen keeps the action boundary narrow:
   are never executed.
 - The platform backend is preflighted before an execute job is armed and again
   before scheduling.
+- Stop policies and the experimental verified-success policy also have
+  independent supervisor-side authority gates. Editable state and observed
+  host snapshots cannot authorize a power call by themselves.
 - Real power jobs are serialized with a machine-level lock. An unresolved
   action intent or receipt blocks later jobs.
 - The supervisor persists intent before calling the operating system and keeps
   a receipt for cancellation and post-boot reconciliation.
+- Plugin power attempts also write owner-controlled, create-once recovery
+  records for the pre-call cancellation handle, the Schedule call-start
+  boundary, the accepted backend receipt, and the eventual inert resolution.
+  These records exclude raw session and turn identifiers and remain usable if
+  the mutable job projection cannot be read.
 - If scheduling returns an unknown outcome, DoneThen does not retry the power
   action automatically.
 - The countdown is monitored. Same-task continuation, interruption,
   cancellation, or an excessively late wake attempts a receipt-bound
   cancellation.
+- Lifecycle Hooks retry short state-lock contention within their three-second
+  budget; exhausting that budget remains fail-closed and is reported on
+  stderr without steering Codex.
 - Prompts, transcripts, model responses, environment dumps, and raw session or
   turn identifiers are not stored.
 
@@ -119,6 +139,9 @@ donethen reconcile <job-id>
 donethen doctor [--json]
 ```
 
+For a specific plugin job, `status` and `cancel` fall back to its independent
+recovery record when the mutable job projection is missing or unreadable.
+
 On Windows, `shutdown.exe /a` is system-global, so aborting a DoneThen
 countdown can also abort another concurrently scheduled Windows shutdown.
 
@@ -130,17 +153,18 @@ below claims completed real power-off acceptance.
 
 | Platform | Level | Published statement |
 | --- | --- | --- |
-| `windows-amd64` | C2 | preview; after-stop plugin path and real backend code are present, but real cancel and poweroff acceptance are pending |
-| `windows-arm64` | C1 | portable build only; native acceptance is pending |
-| `linux-amd64` | C1 | systemd helper code is present; installation and real-host acceptance are pending |
-| `linux-arm64` | C1 | systemd helper code is present; installation and real-host acceptance are pending |
-| `darwin-amd64` | C1 | portable build only; signed and notarized helper is not delivered |
-| `darwin-arm64` | C1 | portable build only; signed and notarized helper is not delivered |
+| `windows-amd64` | C2 | preview; dry-run and real backend code are present, but Stop-based execute is disabled pending trusted final Hook arbitration and real power acceptance |
+| `windows-arm64` | C0 | build-only candidate; target-architecture unit evidence is pending |
+| `linux-amd64` | C1 | systemd helper code is present; Stop-based execute, installation, and real-host acceptance are pending |
+| `linux-arm64` | C0 | build-only candidate; arm64 unit and lifecycle VM evidence is pending |
+| `darwin-amd64` | C0 | build-only candidate; native amd64 unit evidence and a power helper are not delivered |
+| `darwin-arm64` | C0 | build-only candidate; native arm64 unit evidence and a power helper are not delivered |
 
 The machine-readable source is
 [`internal/capability/manifest.json`](internal/capability/manifest.json):
-`after_stop` execute is enabled by default on supported platform families;
-`verified_success` execute is disabled by default.
+all plugin execute policies are disabled by default. Responses separately
+report build support, backend-family support, backend preflight, and per-policy
+execute readiness so platform recognition is never presented as authority.
 
 Platform backends:
 
@@ -210,7 +234,9 @@ The expected terminal state is `DRY_RUN_COMPLETE` with reason
 completion envelope, `finish`, a verifier, App Server authority, or a power
 policy.
 
-For real execute mode, `arm` uses this contract:
+The future provider-gated execute contract is shown below for API review. The
+current public MCP returns `stop_arbitration_unavailable` and does not create
+an execute job:
 
 ```json
 {
@@ -292,12 +318,14 @@ belongs in tracked documentation and tests.
 - [x] Bundle a Skill, typed MCP server, and lifecycle Hooks without replacing
   existing Hook sources.
 - [x] Add the default session-bound `after_stop` trigger.
-- [x] Launch a detached supervisor and schedule only after the matching Stop.
+- [x] Reject Stop-based execute unless a trusted final arbitration provider
+  validates the exact Stop event.
 - [x] Keep a minimum two-minute cancellation window and cancel on continuation.
 - [x] Persist recovery intent and receipts around the platform action boundary.
 - [x] Retain the experimental `verified_success` state machine separately.
 - [x] Add Windows and Linux platform implementations and safe macOS rejection.
 - [ ] Complete real Windows countdown/cancel and power-off acceptance.
+- [ ] Implement and validate a trusted host final-Stop arbitration adapter.
 - [ ] Complete Linux helper installation and real-host acceptance per target.
 - [ ] Deliver a signed/notarized macOS helper, if the project chooses to support
   macOS power actions.
